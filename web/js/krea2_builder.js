@@ -1203,7 +1203,9 @@ class Builder {
                     : "Add all tags (select a region first)" });
             addAll.disabled = !target;
             addAll.onclick = () => {
-                for (const t of data.tags) this.addTagToRegion(t);
+                // reverse so the loop's prepends leave tags in original order
+                for (const t of [...data.tags].reverse())
+                    this.addTagToRegion(t);
                 back.remove();
             };
             box.append(addAll);
@@ -1232,7 +1234,7 @@ class Builder {
         const cur = (r.desc || "").trim();
         const has = cur.split(",").map((s) => s.trim().toLowerCase())
                        .includes(tag.toLowerCase());
-        if (!has) r.desc = cur ? cur + ", " + tag : tag;
+        if (!has) r.desc = cur ? tag + ", " + cur : tag;  // trigger tags lead
         if (chip) { chip.style.opacity = "0.45"; chip.disabled = true; }
         this.commit();
     }
