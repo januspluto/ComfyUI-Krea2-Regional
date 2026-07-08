@@ -29,7 +29,7 @@ Clone into `ComfyUI/custom_nodes/` and restart:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/janiterpluto/ComfyUI-Krea2-Regional.git
+git clone https://github.com/januspluto/ComfyUI-Krea2-Regional.git
 ```
 
 Requires a ComfyUI build with native Krea 2 support (v0.26+). No extra Python
