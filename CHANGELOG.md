@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix: the builder's per-region LoRA dropdown now refreshes on **R**
+  (refresh node definitions) — newly added loras appear without a full page
+  reload, via a `refreshComboInNodes` hook.
+
 - Add **Krea 2 Empty Latent Image** node (aspect buckets + megapixels dial,
   VAE-correct 16-channel latents, WIDTH/HEIGHT outputs).
 - Refactor shared caption/mask/LoRA helpers into `caption_utils.py`; the

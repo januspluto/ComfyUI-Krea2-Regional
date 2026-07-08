@@ -21,22 +21,28 @@ const S = {
 };
 
 let LORA_LIST = null;
-async function loraList() {
-    if (LORA_LIST) return LORA_LIST;
+async function loraList(force) {
+    if (LORA_LIST && !force) return LORA_LIST;
+    let list = null;
     try {
         const r = await api.fetchApi("/models/loras");
         if (r.ok) {
             const j = await r.json();
-            LORA_LIST = Array.isArray(j) ? j.map((x) => x?.name ?? x) : [];
+            list = Array.isArray(j) ? j.map((x) => x?.name ?? x) : [];
         }
     } catch (e) { /* fall through */ }
-    if (!LORA_LIST?.length) {
+    if (!list?.length) {
         try {
-            const r = await api.fetchApi("/object_info/LoraLoader");
+            const r = await api.fetchApi(
+                "/object_info/LoraLoader?" + Date.now());
             const j = await r.json();
-            LORA_LIST = j?.LoraLoader?.input?.required?.lora_name?.[0] ?? [];
-        } catch (e) { LORA_LIST = []; }
+            list = j?.LoraLoader?.input?.required?.lora_name?.[0] ?? [];
+        } catch (e) { list = []; }
     }
+    // only overwrite the cache if we actually got something, so a transient
+    // fetch failure on refresh doesn't wipe a good list
+    if (list && list.length) LORA_LIST = list;
+    else if (!LORA_LIST) LORA_LIST = list || [];
     return LORA_LIST;
 }
 
@@ -169,9 +175,12 @@ function captionToState(cap) {
     return out;
 }
 
+const BUILDER_INSTANCES = new Set();
+
 class Builder {
     constructor(node) {
         this.node = node;
+        BUILDER_INSTANCES.add(this);
         this.state = { regions: [], base_loras: [] };
         this.sel = -1;
         this.execBg = null;
@@ -1405,6 +1414,14 @@ class Builder {
 
 app.registerExtension({
     name: "krea2.regional.builder",
+    // ComfyUI calls this when the user presses R (refresh node definitions).
+    // Re-fetch the lora list and repaint every open builder so newly added
+    // loras show up without a full page reload.
+    async refreshComboInNodes() {
+        await loraList(true);
+        for (const inst of BUILDER_INSTANCES)
+            try { inst.refreshPanels(); inst.redraw(); } catch (e) { /**/ }
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "Krea2RegionalBuilder") return;
         const onCreated = nodeType.prototype.onNodeCreated;
@@ -1432,6 +1449,7 @@ app.registerExtension({
             onRemoved?.apply(this, arguments);
             this.k2b?.dock();
             this.k2b?.hostRO?.disconnect();
+            if (this.k2b) BUILDER_INSTANCES.delete(this.k2b);
         };
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
