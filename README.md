@@ -21,6 +21,8 @@ step** instead of the usual N-passes-and-blend approach:
 The result is fast (one pass, not N) with soft, coherent seams; the trade-off
 is some LoRA/style bleed at boundaries, which several options control.
 
+![krea2_regional](https://github.com/janiterpluto/ComfyUI-Krea2-Regional/blob/main/docs/images/workflow.png)
+
 ## Install
 
 Clone into `ComfyUI/custom_nodes/` and restart:
