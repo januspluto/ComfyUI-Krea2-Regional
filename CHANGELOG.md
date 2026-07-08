@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fix: **Caption button** returned "caption run rejected (400)". It now sends
+  the full graph with a hidden PreviewAny probe targeted via
+  `partial_execution_targets`, instead of a pruned graph with no output node
+  (which ComfyUI rejects as `prompt_no_outputs`). Covered by
+  `test_caption_payload.py`.
+
 ## 1.0.0
 
 First public release.

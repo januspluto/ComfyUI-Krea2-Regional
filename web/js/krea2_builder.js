@@ -572,37 +572,52 @@ class Builder {
 
         this.toast("captioning…", true);
         try {
-            // full prompt, then prune to just what feeds the captioner output
+            // Send the FULL graph (no pruning \u2192 no dangling links / missing
+            // inputs) and ask ComfyUI to execute only toward the captioner.
+            // The captioner usually isn't an OUTPUT_NODE, so inject a hidden
+            // PreviewAny wired to its output slot and target THAT — its result
+            // shows up in /history under a `text` ui field. ComfyUI only runs
+            // the captioner + its upstream (+ our preview), not the sampler.
             const full = await app.graphToPrompt();
-            const output = full.output;
-            const keep = new Set();
-            const walk = (id) => {
-                id = String(id);
-                if (keep.has(id) || !output[id]) return;
-                keep.add(id);
-                for (const v of Object.values(output[id].inputs || {}))
-                    if (Array.isArray(v) && v.length === 2) walk(v[0]);
+            const prompt = full.output;
+            const srcId = String(src.id);
+            if (!prompt[srcId]) {
+                this.toast("captioner isn't in the current graph");
+                return;
+            }
+            // pick a node id that doesn't collide with the real graph
+            let previewId = 10_000_000;
+            while (prompt[String(previewId)]) previewId++;
+            previewId = String(previewId);
+            prompt[previewId] = {
+                class_type: "PreviewAny",
+                inputs: { source: [srcId, srcSlot] },
+                _meta: { title: "k2b_caption_probe" },
             };
-            walk(src.id);
-            const pruned = {};
-            for (const id of keep) pruned[id] = output[id];
-            // tag the captioner so we can pick its result out of history
-            const tagId = String(src.id);
             const r = await api.fetchApi("/prompt", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    prompt: pruned,
+                    prompt,
                     client_id: api.clientId,
+                    partial_execution_targets: [previewId],
                     extra_data: { k2b_caption_for: this.node.id },
                 }),
             });
             if (!r.ok) {
-                this.toast("caption run rejected (" + r.status + ")");
+                let detail = "";
+                try {
+                    const j = await r.json();
+                    detail = j?.error?.message || j?.error?.type || "";
+                    console.error("[k2b] /prompt 400", j);
+                } catch (e) { /* non-json body */ }
+                this.toast("caption rejected: " + (detail || r.status));
                 return;
             }
             const { prompt_id } = await r.json();
-            const text = await this.awaitCaption(prompt_id, tagId, srcSlot);
+            // the preview node carries the text; fall back to the captioner id
+            const text = await this.awaitCaption(prompt_id, previewId, srcSlot,
+                                                 srcId);
             if (text == null) { this.toast("no caption returned"); return; }
             const cap = this.parseCaption(text);
             if (!cap) {
@@ -617,8 +632,8 @@ class Builder {
         }
     }
 
-    awaitCaption(promptId, nodeId, slot) {
-        // poll /history for this prompt until its outputs (or an error) appear
+    awaitCaption(promptId, previewId, slot, srcId) {
+        // poll /history until the preview node's outputs (or an error) appear
         return new Promise((resolve) => {
             let tries = 0;
             const tick = async () => {
@@ -629,15 +644,21 @@ class Builder {
                     const entry = j?.[promptId];
                     if (entry) {
                         const status = entry.status?.status_str;
-                        if (status === "error") return resolve(null);
-                        const outs = entry.outputs?.[nodeId];
-                        const txt = this.pickText(outs, slot);
+                        const done = entry.status?.completed;
+                        // prefer the preview probe, then the captioner node,
+                        // then a deep scan of every node's outputs
+                        let txt = this.pickText(entry.outputs?.[previewId], slot);
+                        if (txt == null && srcId != null)
+                            txt = this.pickText(entry.outputs?.[srcId], slot);
                         if (txt != null) return resolve(txt);
-                        if (entry.status?.completed) return resolve(
+                        if (status === "error")
+                            return resolve(done ? this.pickText(
+                                entry.outputs, slot, true) : null);
+                        if (done) return resolve(
                             this.pickText(entry.outputs, slot, true));
                     }
                 } catch (e) { /* keep polling */ }
-                if (tries > 600) return resolve(null);  // ~2 min ceiling
+                if (tries > 900) return resolve(null);  // ~3 min ceiling
                 setTimeout(tick, 200);
             };
             tick();
@@ -646,17 +667,26 @@ class Builder {
 
     pickText(outs, slot, deep) {
         if (!outs) return null;
-        const scan = (o) => {
-            if (!o) return null;
-            // common shapes: {text:[...]}, {string:[...]}, ui text arrays
-            for (const key of ["text", "string", "STRING", "generated_text"]) {
-                const v = o[key];
-                if (Array.isArray(v) && v.length)
-                    return typeof v[slot] === "string" ? v[slot]
-                         : (typeof v[0] === "string" ? v[0] : null);
+        const asText = (v) => {
+            if (typeof v === "string") return v;
+            if (Array.isArray(v)) {
+                const parts = v.filter((x) => typeof x === "string");
+                if (parts.length) return parts.join("");
             }
-            for (const v of Object.values(o))
-                if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+            return null;
+        };
+        const scan = (o) => {
+            if (!o || typeof o !== "object") return null;
+            // PreviewAny + most text nodes: {text:[...]}. Also string/STRING.
+            for (const key of ["text", "string", "STRING", "generated_text",
+                               "value"]) {
+                const t = asText(o[key]);
+                if (t != null) return t;
+            }
+            for (const v of Object.values(o)) {
+                const t = asText(v);
+                if (t != null) return t;
+            }
             return null;
         };
         if (deep) {
