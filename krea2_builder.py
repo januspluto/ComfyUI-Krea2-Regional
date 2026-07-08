@@ -23,11 +23,11 @@ import logging
 import torch
 
 try:
-    from .ideogram_bridge import (_encode, _extract_lora_tags,
+    from .caption_utils import (_encode, _extract_lora_tags,
                                   _load_lora_entry, _loads_caption,
                                   _poly_mask, _rect_mask)
 except ImportError:  # standalone (tests)
-    from ideogram_bridge import (_encode, _extract_lora_tags,
+    from caption_utils import (_encode, _extract_lora_tags,
                                  _load_lora_entry, _loads_caption,
                                  _poly_mask, _rect_mask)
 

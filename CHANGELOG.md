@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add **Krea 2 Empty Latent Image** node (aspect buckets + megapixels dial,
+  VAE-correct 16-channel latents, WIDTH/HEIGHT outputs).
+- Refactor shared caption/mask/LoRA helpers into `caption_utils.py`; the
+  Ideogram bridge node is now optional (the canvas builder supersedes it).
+
 - Fix: **Caption button** returned "caption run rejected (400)". It now sends
   the full graph with a hidden PreviewAny probe targeted via
   `partial_execution_targets`, instead of a pruned graph with no output node

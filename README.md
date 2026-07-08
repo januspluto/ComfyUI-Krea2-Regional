@@ -63,12 +63,18 @@ generation. Options: `restrict_img_attn` (block cross-region image attention)
 and `exclusive_masks` (winner-take-all where masks overlap). Takes the
 builder's outputs; returns a patched `MODEL` and combined `CONDITIONING`.
 
+**Krea 2 Empty Latent Image** — an rgthree-style empty latent sized for
+Krea 2's Qwen-Image VAE (16-channel, /16 dims, 1K–2K native range).
+Aspect-ratio buckets + a megapixels dial; outputs the LATENT plus WIDTH/
+HEIGHT ints that wire straight into the builder.
+
 **Krea2 Regional LoRA** / **Krea2 Regional Prompt** — lower-level building
 blocks if you'd rather compose regions from node chains than use the canvas.
 
-**Krea2 Regions from Ideogram JSON** — a bridge that turns an Ideogram-4
-caption JSON (e.g. from KJNodes' `Ideogram4PromptBuilderKJ`) into regions
-without the canvas. The builder supersedes it for most uses.
+**Krea2 Regions from Ideogram JSON** *(optional)* — a headless bridge that
+turns an Ideogram-4 caption JSON into regions with no canvas. The builder
+supersedes it (it imports the same JSON via `import_json` and lets you edit
+the result), so most users can ignore this; it's kept for no-UI pipelines.
 
 ## Captioning an image into regions
 

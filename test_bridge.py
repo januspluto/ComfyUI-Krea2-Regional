@@ -3,7 +3,8 @@ import os
 import sys, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
-from ideogram_bridge import Krea2RegionsFromIdeogram, _bbox_to_frac
+from ideogram_bridge import Krea2RegionsFromIdeogram
+from caption_utils import _bbox_to_frac
 
 
 class MockClip:
@@ -123,8 +124,8 @@ print("\nall bridge tests passed")
 
 # ================= LoRA assignment tests =================
 import sys, types, torch
-from ideogram_bridge import (_extract_lora_tags, _parse_lora_map,
-                             _LORA_SD_CACHE)
+from caption_utils import (_extract_lora_tags, _parse_lora_map,
+                           _LORA_SD_CACHE)
 
 # stub folder_paths + comfy.utils so lora resolution works headless
 fp = types.ModuleType("folder_paths")

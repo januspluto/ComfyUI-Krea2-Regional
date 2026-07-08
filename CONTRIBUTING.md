@@ -12,6 +12,7 @@ COMFYUI_PATH=/path/to/ComfyUI python test_nodes.py
 COMFYUI_PATH=/path/to/ComfyUI python test_bridge.py
 COMFYUI_PATH=/path/to/ComfyUI python test_builder.py
 python test_server_routes.py
+python test_latent.py
 COMFYUI_PATH=/path/to/ComfyUI python test_caption_payload.py
 ```
 

@@ -27,8 +27,10 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install einops safetensors transformers pillow numpy
 
-      - name: Server-route tests (standalone)
-        run: python test_server_routes.py
+      - name: Standalone tests
+        run: |
+          python test_server_routes.py
+          python test_latent.py
 
       - name: Regional / bridge / builder tests
         env:
