@@ -1,0 +1,6 @@
+﻿# Dev-only files
+test_*.py
+docs/
+.github/
+CONTRIBUTING.md
+CHANGELOG.md
