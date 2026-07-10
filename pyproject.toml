@@ -7,9 +7,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 [project.urls]
-Repository = "https://github.com/YOUR_USERNAME/ComfyUI-Krea2-Regional"
+Repository = "https://github.com/januspluto/ComfyUI-Krea2-Regional"
 
 [tool.comfy]
-PublisherId = "YOUR_PUBLISHER_ID"
+PublisherId = "    januspluto"
 DisplayName = "Krea2 Regional"
 Icon = ""
