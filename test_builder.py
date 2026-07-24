@@ -50,7 +50,7 @@ def B(**kw):
     a = dict(clip=MockClip(), width=W, height=H, grow_px=0, feather_px=0,
              base_prompt="", background="", aesthetics="", lighting="",
              medium="", region_append="", import_mode="when empty",
-             regions_data="")
+             regions_data="", layout_in_base="off")
     a.update(kw)
     return node.build(**a)
 
@@ -186,3 +186,74 @@ assert (m_xy - m_yx).abs().max() == 0, "xy captions must map identically"
 print("10) bbox_order xy: ok")
 
 print("done")
+
+# ---- 11. layout_in_base: position hints land in the base prompt
+out11 = B(base_prompt="a duel at dawn", regions_data=json.dumps(state),
+          layout_in_base="position hints")
+bp11 = out11["result"][4]
+assert "left side of the image" in bp11 and "right side of the image" in bp11, bp11
+assert "an armored knight" in bp11 and "a wizard" in bp11
+assert "a duel at dawn" in bp11
+# off mode keeps subjects out of the base (old behavior)
+out11b = B(base_prompt="a duel at dawn", regions_data=json.dumps(state),
+           layout_in_base="off")
+assert "knight" not in out11b["result"][4]
+print("11) position hints in base: ok")
+
+# ---- 12. layout_in_base: full JSON is valid Ideogram-style structure
+out12 = B(base_prompt="a duel at dawn", background="a courtyard",
+          aesthetics="cinematic", regions_data=json.dumps(state),
+          layout_in_base="full JSON")
+cap12 = json.loads(out12["result"][4])
+els = cap12["compositional_deconstruction"]["elements"]
+assert len(els) == 2
+assert els[0]["desc"].startswith("an armored knight")
+assert len(els[0]["bbox"]) == 4 and all(0 <= v <= 1000 for v in els[0]["bbox"])
+# yx order: knight box x:[0,0.45] y:[0.1,0.9] -> [100, 0, 900, 450]
+assert els[0]["bbox"] == [100, 0, 900, 450], els[0]["bbox"]
+assert cap12["high_level_description"] == "a duel at dawn"
+assert cap12["compositional_deconstruction"]["background"] == "a courtyard"
+assert "<lora" not in out12["result"][4], "lora tags must not leak into JSON"
+print("12) full-JSON structured base: ok")
+
+# ---- 13. text regions carry exact text in both modes; zones make sense
+state_z = {"regions": [
+    {"shape": "rect", "x": 0.4, "y": 0.02, "w": 0.2, "h": 0.12,
+     "rtype": "text", "text": "OPEN", "desc": "neon", "loras": []}],
+    "base_loras": []}
+out13 = B(regions_data=json.dumps(state_z), layout_in_base="position hints")
+assert 'the text "OPEN"' in out13["result"][4]
+assert "top of the image" in out13["result"][4], out13["result"][4]
+out13j = B(regions_data=json.dumps(state_z), layout_in_base="full JSON")
+c13 = json.loads(out13j["result"][4])
+assert c13["compositional_deconstruction"]["elements"][0]["text"] == "OPEN"
+print("13) text regions + zone naming: ok")
+
+print("layout tests done")
+
+# ---- 14. trigger words must not leak into layout hints
+from krea2_builder import _hint_clause, _strip_trigger_lead
+assert _hint_clause("xk3wchar, a woman in a red coat") == "a woman in a red coat"
+assert _hint_clause("ohwx, a man on a horse") == "a man on a horse"
+assert _hint_clause("sunflowers") == "sunflowers", "plain single words survive"
+assert _hint_clause("xk3wchar") == "a subject", "tag-like blob alone -> generic"
+assert _hint_clause('the text "OPEN", neon') == 'the text "OPEN"'
+assert "<" not in _hint_clause("<lora:leftover:1> a castle on a hill")
+assert _strip_trigger_lead("m_char, a woman, red coat") == "a woman, red coat"
+assert _strip_trigger_lead("sunflowers, golden") == "sunflowers, golden"
+
+state_trig = {"regions": [
+    {"shape": "rect", "x": 0.55, "y": 0.55, "w": 0.4, "h": 0.4,
+     "rtype": "obj", "text": "",
+     "desc": "xk3wchar, a woman in a red coat", "loras": []}],
+    "base_loras": []}
+out14 = B(regions_data=json.dumps(state_trig), layout_in_base="position hints")
+bp14 = out14["result"][4]
+assert "xk3wchar" not in bp14, f"trigger leaked into base: {bp14}"
+assert "a woman in a red coat" in bp14 and "lower right" in bp14
+out14j = B(regions_data=json.dumps(state_trig), layout_in_base="full JSON")
+cap14 = json.loads(out14j["result"][4])
+assert "xk3wchar" not in cap14["compositional_deconstruction"]["elements"][0]["desc"]
+# region conditioning still carries the trigger (that's where the LoRA mask is)
+assert "xk3wchar" in out14["result"][5]
+print("14) trigger words kept out of base representations: ok")

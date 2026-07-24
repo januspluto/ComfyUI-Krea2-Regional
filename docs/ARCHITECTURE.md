@@ -83,3 +83,50 @@ execute. The **Caption** button prunes the graph to just the captioner feeding
 `import_json` and POSTs it to `/api/prompt`, so only that node runs. LoRA
 trained-tags come from `/krea2_regional/lora_info` (`server_routes.py`), which
 reads just the safetensors JSON header — no weight load, no network.
+
+## Adaptive masks (FreeFuse-style routing)
+
+With `adaptive_masks` on, the wrapper counts model calls per sampling run
+(runs are detected by the timestep jumping back up) and, during the first
+`adaptive_steps` calls, computes its own q·k affinity between image-token
+queries and each region's prompt-token keys at four evenly spaced mid-network
+blocks (max over the region's tokens — keying on trigger words — mean over
+heads, cond rows only). The attention *mask* can't hide this signal because
+the affinity matmul is ours, so tokens outside a region's box still register.
+
+After the capture window the accumulated maps are despeckled, normalized, and
+thresholded into refined soft masks — constrained to the grown user boxes in
+"refine" mode, free competition in "free" mode, with an empty-discovery
+fallback to the drawn box — and all cached attention/LoRA masks rebuild once.
+This adapts FreeFuse (arXiv:2510.23515), which showed that early-step
+attention in flow models reveals subject placement well enough to route
+LoRAs without user masks.
+
+## Layout in the base prompt
+
+The attention masks constrain what each token may READ, but nothing in them
+tells the model WHERE to compose a subject — the base prompt drives global
+composition, and historically it carried no positional signal. Krea 2's
+Qwen3-VL encoder reads positional language and Ideogram-style structured
+prompts as soft layout guidance (community "JSON area prompting" workflows
+are built on exactly this), so the builder's `layout_in_base` injects the
+region layout into the base prompt: natural-language placement sentences
+derived from each box's zone and size ("position hints"), or the full
+structured caption with 0-1000 bboxes ("full JSON"). Steering (base prompt)
+and isolation (masks + token-gated LoRAs) then pull in the same direction,
+which is what makes generated subjects actually land in their boxes.
+
+## Region Lock (latent-only anchoring)
+
+A post-CFG sampler hook (`set_model_sampler_post_cfg_function`): once the
+schedule passes `region_lock_start`, the model's predicted-clean latent (x0)
+is snapshotted; until `region_lock_end`, every step pulls the region back:
+`denoised += strength * mask * (snapshot - denoised)`. The mold is the
+model's own early prediction, so there is no reference image, no VAE
+round-trip, and no latent-format conversion. Windows are compared in sigma
+space; a rising sigma resets state (new run). The mask upsamples the live
+token-grid region masks (including adaptive refinements) to the latent grid
+with a border-safe feather. Limitation stated plainly: this stabilizes
+identity WITHIN a generation (late-step drift/mutation); pinning a specific
+likeness ACROSS seeds inherently requires an external anchor (a reference
+image or a LoRA).

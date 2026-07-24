@@ -7,6 +7,8 @@ LoRAs, and generate in a **single pass**.
 ![status](https://img.shields.io/badge/status-beta-orange)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+![Example workflow](docs/images/workflow.png)
+
 Krea 2 is a single-stream MMDiT: text and image tokens share every attention
 op. This pack exploits that to do regional generation in **one model pass per
 step** instead of the usual N-passes-and-blend approach:
@@ -20,8 +22,6 @@ step** instead of the usual N-passes-and-blend approach:
 
 The result is fast (one pass, not N) with soft, coherent seams; the trade-off
 is some LoRA/style bleed at boundaries, which several options control.
-
-![krea2_regional](docs/images/workflow.png)
 
 ## Install
 
@@ -51,6 +51,8 @@ Optionally wire an image captioner (see below) into the builder's
 `import_json` and hit the **Caption** button to auto-populate regions from an
 image — without running a full generation.
 
+An example workflow is in [`example_workflows/`](example_workflows/) — drag the `.json` onto the ComfyUI canvas to load it.
+
 ## Nodes
 
 **Krea2 Regional Builder (canvas)** — the main event. A canvas editor with
@@ -61,9 +63,11 @@ background (from a wired image or the Grab BG button), a pop-out editor
 window, and a Caption button that runs only a connected captioner.
 
 **Krea2 Apply Regional** — patches the model for single-pass regional
-generation. Options: `restrict_img_attn` (block cross-region image attention)
-and `exclusive_masks` (winner-take-all where masks overlap). Takes the
-builder's outputs; returns a patched `MODEL` and combined `CONDITIONING`.
+generation. Options: `adaptive_masks` (FreeFuse-style: snap masks to the
+subjects the model actually draws), `restrict_img_attn` (block cross-region
+image attention), `exclusive_masks` (winner-take-all where masks overlap),
+and `base_loras_exclude_regions`. Takes the builder's outputs; returns a
+patched `MODEL` and combined `CONDITIONING`.
 
 **Krea 2 Empty Latent Image** — an rgthree-style empty latent sized for
 Krea 2's Qwen-Image VAE (16-channel, /16 dims, 1K–2K native range).
@@ -91,16 +95,35 @@ import its output — no Krea2 sampling.
 
 In order of impact:
 
-1. **Keep subjects out of the base prompt.** The base prompt is shared by
-   every image token, so if it names subjects ("a knight and a wizard"), the
-   model tries to render them everywhere — the main cause of subjects
-   drifting between regions. Describe the scene generically in the base;
-   keep each subject's identity only in its region prompt.
-2. **`exclusive_masks`** (Apply Regional, default on) — where grown/feathered
+1. **`adaptive_masks`** (Apply Regional) — FreeFuse-style adaptive routing
+   ([arXiv:2510.23515](https://arxiv.org/abs/2510.23515)): during the first
+   couple of steps the wrapper watches the attention between each region's
+   prompt tokens and the image tokens — i.e. where the model *actually*
+   placed each subject — then snaps the region masks to those silhouettes
+   for the remaining steps. "refine boxes" keeps discovery inside your
+   (slightly grown) boxes, so rectangles become rough hints and the LoRA
+   follows the subject's real shape; "free" lets regions land anywhere and
+   your boxes only seed the prompts.
+2. **`layout_in_base`** (Builder, default "position hints") — Krea 2's
+   Qwen3-VL encoder reads positional and structured prompts as layout
+   guidance, so the builder injects each region's placement into the base
+   prompt ("in the left side of the image, prominent: an armored knight…"),
+   or the whole layout as an Ideogram-style JSON in "full JSON" mode. This
+   steers WHERE the model composes each subject; the attention masks handle
+   isolation and LoRA routing. Without it, the base prompt carries no
+   positional signal and the masks fight whatever composition the model
+   picks — the classic "subjects don't line up with the boxes" failure.
+   Note this supersedes the old "keep subjects out of the base" rule:
+   *anchored* subject mentions (with positions) help; only *un-anchored*
+   enumeration ("a knight and a wizard") causes drift.
+3. **`exclusive_masks`** (Apply Regional, default on) — where grown/feathered
    masks overlap, each token keeps only its strongest region.
-3. **`restrict_img_attn`** (Apply Regional) — blocks image-to-image attention
+4. **`restrict_img_attn`** (Apply Regional) — blocks image-to-image attention
    across regions. Strongest lever; can look collaged at hard seams.
-4. **Keep `grow_px`/`feather_px` small** for tightly packed layouts (at
+5. **`base_loras_exclude_regions`** (Apply Regional) — style/base LoRAs
+   apply everywhere *except* inside subject regions, so a style LoRA can
+   skin the scene without contaminating character LoRAs.
+6. **Keep `grow_px`/`feather_px` small** for tightly packed layouts (at
    1024px each latent token is 16px), and leave gutters between boxes.
 
 Some soft bleed through the shared base prompt is inherent to single-pass
@@ -110,9 +133,14 @@ an option at N-times the step cost.
 
 ## LoRA formats
 
-Per-region and base LoRAs load from your `models/loras` folder. Both PEFT/
-diffusers (`lora_A`/`lora_B`) and kohya (`lora_down`/`lora_up` + `alpha`) key
-styles are matched against Krea 2's `blocks.*` and `txtfusion.*` layers.
+Per-region and base LoRAs load from your `models/loras` folder. PEFT/
+diffusers (`lora_A`/`lora_B`), kohya (`lora_down`/`lora_up` + `alpha`), and
+**LoKr** (Kronecker: `lokr_w1`/`lokr_w2`, direct or a@b-factorized — what
+recent ai-toolkit builds output) are all matched against Krea 2's `blocks.*`
+and `txtfusion.*` layers; tucker/conv LoKr variants are skipped with a
+warning. Tip: a region-masked LoRA has to establish its identity in a
+fraction of the image — strengths around 1.3–1.6 often work better than the
+~1.0 you'd use globally.
 Regular `LoraLoader`/Power Lora Loader weight patches stack on top cleanly.
 If a checkpoint logs unmatched keys, open an issue with a few key names.
 

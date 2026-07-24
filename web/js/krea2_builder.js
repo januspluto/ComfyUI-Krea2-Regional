@@ -305,7 +305,8 @@ class Builder {
                 { value: v, textContent: "guide: " + v,
                   selected: g.guide === v }));
         this.guideSel.onchange = () => {
-            g.guide = this.guideSel.value; this.persist(); this.redraw();
+            this.state.grid.guide = this.guideSel.value;
+            this.persist(); this.redraw();
         };
         this.gridSel = el("select", S.sel);
         for (const v of [8, 12, 16, 24, 32])
@@ -313,13 +314,14 @@ class Builder {
                 { value: String(v), textContent: v + "×",
                   selected: g.n === v }));
         this.gridSel.onchange = () => {
-            g.n = parseInt(this.gridSel.value, 10); this.persist(); this.redraw();
+            this.state.grid.n = parseInt(this.gridSel.value, 10);
+            this.persist(); this.redraw();
         };
         this.snapBox = el("input", { margin: "0" },
                           { type: "checkbox", checked: !!g.snap,
                             title: "snap boxes to the grid" });
         this.snapBox.onchange = () => {
-            g.snap = this.snapBox.checked; this.persist();
+            this.state.grid.snap = this.snapBox.checked; this.persist();
         };
         this.bar2.append(this.rectBtn, this.lassoBtn,
                          el("span", { flex: "1" }),
@@ -338,6 +340,15 @@ class Builder {
         Object.assign(this.lassoBtn.style,
                       t === "lasso" ? S.btnOn : { background: "#2a2a2a",
                           borderColor: "#444", color: "#ccc" });
+    }
+
+    syncGridUI() {
+        const g = this.state.grid;
+        if (this.guideSel) this.guideSel.value = g.guide;
+        if (this.gridSel) this.gridSel.value = String(g.n);
+        if (this.snapBox) this.snapBox.checked = !!g.snap;
+        if (this.bgSlider && this.state.bg_brightness != null)
+            this.bgSlider.value = String(this.state.bg_brightness);
     }
 
     snap(v) {
@@ -1460,11 +1471,12 @@ app.registerExtension({
                 const v = JSON.parse(b.widget.value || "{}");
                 b.state.regions = v.regions || [];
                 b.state.base_loras = v.base_loras || [];
-                if (v.grid) b.state.grid = v.grid;
+                if (v.grid) Object.assign(b.state.grid, v.grid);
                 if (v.bg_brightness != null)
                     b.state.bg_brightness = v.bg_brightness;
             } catch (e) { /* keep current */ }
             b.sel = -1;
+            b.syncGridUI();
             b.refreshPanels();
             b.relayout();
             b.redraw();
