@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 (unreleased)
+## 1.1.0
 
 - **Scheduled restrict** (`restrict_end_percent` on Apply Regional): keep
   `restrict_img_attn` isolation during the early identity-forming steps,
@@ -58,8 +58,6 @@
   and "free" modes, with `adaptive_steps` / `adaptive_threshold` controls.
 - **`base_loras_exclude_regions`**: base/style LoRAs apply everywhere except
   inside subject regions.
-
-## Unreleased
 
 - Fix: the builder's per-region LoRA dropdown now refreshes on **R**
   (refresh node definitions) — newly added loras appear without a full page
