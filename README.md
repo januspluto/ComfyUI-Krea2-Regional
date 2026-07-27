@@ -29,7 +29,7 @@ Clone into `ComfyUI/custom_nodes/` and restart:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/januspluto/ComfyUI-Krea2-Regional.git
+git clone https://github.com/YOUR_USERNAME/ComfyUI-Krea2-Regional.git
 ```
 
 Requires a ComfyUI build with native Krea 2 support (v0.26+). No extra Python
@@ -119,7 +119,10 @@ In order of impact:
 3. **`exclusive_masks`** (Apply Regional, default on) — where grown/feathered
    masks overlap, each token keeps only its strongest region.
 4. **`restrict_img_attn`** (Apply Regional) — blocks image-to-image attention
-   across regions. Strongest lever; can look collaged at hard seams.
+   across regions. Strongest lever; can look collaged at hard seams. Pair it
+   with **`restrict_end_percent`** (~0.4-0.6) to get both: hard isolation
+   while each subject's identity forms, then an open second half where the
+   model integrates seams and lighting into one cohesive image.
 5. **`base_loras_exclude_regions`** (Apply Regional) — style/base LoRAs
    apply everywhere *except* inside subject regions, so a style LoRA can
    skin the scene without contaminating character LoRAs.

@@ -507,3 +507,74 @@ err21 = (y21 - exp21).abs().max().item()
 assert err21 < 1e-4, f"multi-lokr stacking broken: {err21}"
 patcher21.unpatch_model()
 print(f"21) two LoKr + standard stacking (issue #1): ok (err {err21:.1e})")
+
+# ---- 22. unmaskable layers (tmlp/tproj): classified, optional global apply
+import comfy.model_patcher as _mp22
+sd22 = {
+    "lora_unet_blocks_0_attn_wq.lora_down.weight": torch.randn(4, CFG["features"]) * 0.1,
+    "lora_unet_blocks_0_attn_wq.lora_up.weight": torch.randn(CFG["features"], 4) * 0.1,
+    # timestep-embedding layer: real module, NOT token-sequence
+    "lora_unet_tmlp_0.lora_down.weight": torch.randn(4, CFG["tdim"]) * 0.1,
+    "lora_unet_tmlp_0.lora_up.weight": None,  # placeholder, set below
+    # genuinely unknown key: must still hit the warning path
+    "lora_unet_bogus_layer.lora_down.weight": torch.randn(4, 8),
+    "lora_unet_bogus_layer.lora_up.weight": torch.randn(8, 4),
+}
+tmlp0 = container.diffusion_model.tmlp[0]
+sd22["lora_unet_tmlp_0.lora_up.weight"] = \
+    torch.randn(tmlp0.weight.shape[0], 4) * 0.1
+sd22["lora_unet_tmlp_0.lora_down.weight"] = \
+    torch.randn(4, tmlp0.weight.shape[1]) * 0.1
+
+# skip mode: 1 token-sequence layer patched, no weight patches added
+p22a = _mp22.ModelPatcher(container, load_device="cpu", offload_device="cpu")
+n22a = _inj(p22a, sd22, "unm_a", 1.0)
+assert n22a == 1, n22a
+assert not any("tmlp" in k for k in p22a.patches), "skip mode must not patch"
+print("22a) unmaskable skip mode: ok")
+
+# apply-globally mode: tmlp weight patch registered and changes the weight
+p22b = _mp22.ModelPatcher(container, load_device="cpu", offload_device="cpu")
+n22b = _inj(p22b, sd22, "unm_b", 1.0, unmaskable="apply globally")
+key22 = "diffusion_model.tmlp.0.weight"
+assert key22 in p22b.patches, list(p22b.patches)[:5]
+w_before = tmlp0.weight.detach().clone()
+p22b.patch_model(device_to="cpu")
+w_after = container.diffusion_model.tmlp[0].weight.detach().clone()
+delta22 = (w_after - w_before).abs().max().item()
+assert delta22 > 1e-6, "global patch must change the tmlp weight"
+p22b.unpatch_model()
+assert torch.allclose(container.diffusion_model.tmlp[0].weight, w_before)
+print(f"22b) unmaskable global mode merges weights: ok (|d|={delta22:.2e})")
+
+# ---- 23. scheduled restrict: isolated early, released late, txt intact
+b23 = dict(bundle(loras=lora_specs, restrict=True))
+b23["restrict_end_sigma"] = 0.5   # release at sigma < 0.5
+to23 = wrapped_opts(b23)
+img_sl = slice(txtlen, txtlen + imglen)
+with torch.no_grad():
+    run(container.diffusion_model, x, torch.full((B,), 0.9), context, to23)
+j_early = b23["_rt"]["joint"][0, 0]
+tm_early = b23["_rt"]["token_masks"]
+assert not bool(j_early[img_sl, img_sl].all()), \
+    "early steps must be image-restricted"
+with torch.no_grad():
+    run(container.diffusion_model, x, torch.full((B,), 0.4), context, to23)
+j_late = b23["_rt"]["joint"][0, 0]
+assert bool(j_late[img_sl, img_sl].all()), \
+    "after the window, image<->image opens up"
+s0, e0 = b23["segments"][0]
+s1, e1 = b23["segments"][1]
+assert not bool(j_late[s0:e0, s1:e1].any()), \
+    "prompt isolation must persist after release"
+assert b23["_rt"]["token_masks"] is tm_early, \
+    "token masks (lora gating) must survive the flip untouched"
+# sentinel -1: never releases
+b23b = dict(bundle(loras=lora_specs, restrict=True))
+to23b = wrapped_opts(b23b)
+with torch.no_grad():
+    run(container.diffusion_model, x, torch.full((B,), 0.9), context, to23b)
+    run(container.diffusion_model, x, torch.full((B,), 0.05), context, to23b)
+assert not bool(b23b["_rt"]["joint"][0, 0][img_sl, img_sl].all()), \
+    "default (no end sigma) stays restricted for the whole run"
+print("23) scheduled restrict window: ok")

@@ -98,6 +98,7 @@ def _normalize_lora_sd(sd: dict) -> dict[str, dict]:
             continue
     out = {}
     for key, g in groups.items():
+        orig_key = key
         entry = None
         if "down" in g and "up" in g:
             entry = {"type": "lora", "down": g["down"], "up": g["up"]}
@@ -131,6 +132,7 @@ def _normalize_lora_sd(sd: dict) -> dict[str, dict]:
                      "alpha_scale": alpha_scale}
         if entry is None:
             continue
+        entry["orig"] = orig_key
         for p in _PREFIXES:
             if key.startswith(p):
                 key = key[len(p):]
@@ -257,25 +259,46 @@ def _patched_linear(base: torch.nn.Module) -> torch.nn.Module:
     return patched
 
 
-def _inject_lora(model_patcher, lora_sd: dict, uid: str, strength: float) -> int:
-    """Attach one LoRA (as adapter `uid`) onto the DiT block Linears."""
+def _inject_lora(model_patcher, lora_sd: dict, uid: str, strength: float,
+                 unmaskable: str = "skip") -> int:
+    """Attach one LoRA (as adapter `uid`) onto the DiT block Linears.
+
+    Keys that hit layers OUTSIDE the token sequence (tmlp/tproj timestep
+    embedders, etc. — trained by newer ai-toolkit configs) can't be
+    region-masked: the timestep vector modulates the whole image through
+    AdaLN, so there is no per-token axis. `unmaskable`:
+      "skip"           -> leave them out (default; logged as INFO)
+      "apply globally" -> merge them as normal weight patches via ComfyUI's
+                          own LoRA loader (affects the WHOLE image)
+    """
     groups = _normalize_lora_sd(lora_sd)
 
     diffusion_model = model_patcher.get_model_object("diffusion_model")
     lookup: dict[str, str] = {}
+    full_lookup: dict[str, str] = {}
     for name, mod in diffusion_model.named_modules():
-        if (name.startswith(("blocks.", "txtfusion.", "txtmlp", "first",
-                             "last")) and hasattr(mod, "weight")
-                and callable(mod)):
-            if mod.weight is not None and mod.weight.ndim == 2:
+        if (hasattr(mod, "weight") and callable(mod)
+                and getattr(mod, "weight", None) is not None
+                and mod.weight.ndim == 2):
+            full_lookup[name] = name
+            full_lookup[name.replace(".", "_")] = name
+            if name.startswith(("blocks.", "txtfusion.", "txtmlp", "first",
+                                "last")):
                 lookup[name] = name
                 lookup[name.replace(".", "_")] = name
 
     patched, skipped = 0, []
+    global_keys: dict[str, str] = {}
     for key, g in groups.items():
         path = lookup.get(key) or lookup.get(key.replace(".", "_"))
         if path is None:
-            skipped.append(key)
+            gpath = (full_lookup.get(key)
+                     or full_lookup.get(key.replace(".", "_")))
+            if gpath is not None:
+                # real layer, just not a token-sequence one
+                global_keys[g["orig"]] = "diffusion_model." + gpath + ".weight"
+            else:
+                skipped.append(key)
             continue
         full = "diffusion_model." + path
         target = _patched_linear(model_patcher.get_model_object(full))
@@ -294,10 +317,29 @@ def _inject_lora(model_patcher, lora_sd: dict, uid: str, strength: float) -> int
         model_patcher.add_object_patch(full, target)
         patched += 1
 
+    if global_keys:
+        if unmaskable == "apply globally":
+            import comfy.lora
+            patches = comfy.lora.load_lora(lora_sd, global_keys,
+                                           log_missing=False)
+            if patches:
+                model_patcher.add_patches(patches, float(strength))
+            logging.info(
+                "[Krea2Regional] lora '%s': %d timestep/embedding layers "
+                "applied GLOBALLY (whole image) — they can't be "
+                "region-masked.", uid, len(global_keys))
+        else:
+            logging.info(
+                "[Krea2Regional] lora '%s': %d timestep/embedding layers "
+                "skipped (e.g. %s) — they modulate the whole image and "
+                "can't be region-masked. Set unmaskable_layers to 'apply "
+                "globally' on Apply Regional to merge them.",
+                uid, len(global_keys), list(global_keys)[:3])
     if skipped:
         logging.warning(
-            "[Krea2Regional] lora '%s': %d keys didn't match any DiT block layer "
-            "(e.g. %s) — is this a Krea 2 LoRA?", uid, len(skipped), skipped[:3]
+            "[Krea2Regional] lora '%s': %d keys didn't match any layer "
+            "(e.g. %s) — is this a Krea 2 LoRA?", uid, len(skipped),
+            skipped[:3]
         )
     return patched
 
@@ -538,6 +580,17 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
     rt["call"] += 1
     rt["blk"] = 0  # per-call joint-attention block counter (capture below)
 
+    # ---- scheduled restrict: hard image<->image isolation while identity
+    # forms, then release so the late steps can integrate seams/lighting.
+    # restrict_end_sigma < 0 means "never release" (classic behavior).
+    restrict_now = bool(bundle["restrict_img_attn"]) and (
+        t0 >= bundle.get("restrict_end_sigma", -1.0) - 1e-9)
+    if rt.get("restrict_now") != restrict_now:
+        # only the attention masks change: keep token masks + adaptive state
+        rt["restrict_now"] = restrict_now
+        rt["masks_built"] = False
+        rt["additive"] = {}
+
     # ---- adaptive finalize: capture window over -> snap masks to the
     # discovered subject silhouettes and rebuild everything once
     capturing = (ad_mode != "off" and rt["refined"] is None
@@ -568,7 +621,7 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
         hard = soft > 0.5
 
         allow, txt_allow = _build_allow(
-            segments, hard, imglen, bundle["restrict_img_attn"], device
+            segments, hard, imglen, rt.get("restrict_now", False), device
         )
         # When every row is regional (the usual turbo cfg=1 case), keep batch
         # dim 1 so the mask broadcasts against ANY caller batch — including
@@ -891,6 +944,15 @@ class Krea2ApplyRegional:
                     "max": 1.0, "step": 0.05,
                     "tooltip": "When to release the lock so the model can "
                                "integrate seams and lighting."}),
+                "restrict_end_percent": ("FLOAT", {"default": 1.0,
+                    "min": 0.05, "max": 1.0, "step": 0.05,
+                    "tooltip": "When restrict_img_attn is on: release the "
+                               "image<->image isolation at this fraction of "
+                               "the schedule. Identity locks in during the "
+                               "restricted window; the open steps afterwards "
+                               "integrate seams and lighting. 1.0 = "
+                               "restricted for the whole run (classic). "
+                               "0.4-0.6 is a good cohesion sweet spot."}),
             },
             "optional": {"base_loras": ("KREA2_LORAS",)},
         }
@@ -903,7 +965,8 @@ class Krea2ApplyRegional:
               exclusive_masks=True, adaptive_masks="off", adaptive_steps=2,
               adaptive_threshold=0.45, base_loras_exclude_regions=False,
               region_lock_strength=0.0, region_lock_start=0.35,
-              region_lock_end=0.85, base_loras=None):
+              region_lock_end=0.85, restrict_end_percent=1.0,
+              unmaskable_layers="skip", base_loras=None):
         if len(conditioning) != 1:
             logging.warning("[Krea2Regional] base conditioning has %d entries; "
                             "using the first.", len(conditioning))
@@ -937,11 +1000,24 @@ class Krea2ApplyRegional:
                 lora_specs.append({"uid": uid, "weight": 1.0, "seg": ridx + 1,
                                    "mask_idx": ridx})
 
+        # scheduled restrict: convert the percent to sigma space so it
+        # tracks the real noise schedule at any step count. >=0.999 means
+        # restricted for the whole run (sentinel -1: never release).
+        restrict_end_sigma = -1.0
+        if restrict_img_attn and restrict_end_percent < 0.999:
+            try:
+                ms = model.model.model_sampling
+                restrict_end_sigma = float(
+                    ms.percent_to_sigma(restrict_end_percent))
+            except Exception:
+                restrict_end_sigma = -1.0  # unknown sampling: never release
+
         bundle = {
             "segments": segments,
             "txt_total": off,
             "masks": [r["mask"] for r in regions],
             "restrict_img_attn": restrict_img_attn,
+            "restrict_end_sigma": restrict_end_sigma,
             "exclusive_masks": exclusive_masks,
             "base_loras_exclude_regions": base_loras_exclude_regions,
             "adaptive": {

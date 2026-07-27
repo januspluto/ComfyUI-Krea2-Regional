@@ -2,6 +2,21 @@
 
 ## 1.1.0 (unreleased)
 
+- **Scheduled restrict** (`restrict_end_percent` on Apply Regional): keep
+  `restrict_img_attn` isolation during the early identity-forming steps,
+  then release it so late steps integrate seams/lighting. Sigma-space
+  window; token masks and adaptive state survive the mid-run switch.
+- Removed the `unmaskable_layers` widget (the capability remains in the
+  loader API; the node always skips timestep-embedding layers, with a clear
+  INFO log). If you saved a workflow with yesterday's dev build, re-check
+  the last widget on Apply Regional after updating.
+
+- **`unmaskable_layers`** (Apply Regional): newer trainers also train Krea2's
+  timestep-embedding layers (`tmlp`/`tproj`); these modulate the whole image
+  and can't be region-masked. They're now classified properly (INFO, not a
+  scary warning) and can optionally be merged globally via ComfyUI's own
+  weight patching for extra likeness.
+
 - Fix: compatibility with current ComfyUI master, which added a
   `ref_latents` positional parameter to Krea2's forward — the wrapper is now
   signature-agnostic, so future parameter insertions can't break it.
