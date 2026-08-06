@@ -61,13 +61,27 @@ types, searchable per-region LoRA dropdowns with a trained-tag info panel,
 base description/background/style fields, grid/snap/guides, a live reference
 background (from a wired image or the Grab BG button), a pop-out editor
 window, and a Caption button that runs only a connected captioner.
+Lassos are fully editable pen-tool style: drag vertices, press-drag an edge
+midpoint to split it, alt-click a vertex to delete it, and scale the whole
+shape by its bounding-box handles; any region converts rect ↔ lasso with
+one button. The region list doubles as **front-to-back depth** — reorder
+with the ↑/↓ buttons; the top region wins where masks overlap.
 
 **Krea2 Apply Regional** — patches the model for single-pass regional
 generation. Options: `adaptive_masks` (FreeFuse-style: snap masks to the
 subjects the model actually draws), `restrict_img_attn` (block cross-region
-image attention), `exclusive_masks` (winner-take-all where masks overlap),
-and `base_loras_exclude_regions`. Takes the builder's outputs; returns a
-patched `MODEL` and combined `CONDITIONING`.
+image attention) with `restrict_end_percent` scheduling, `exclusive_masks`
+(winner-take-all where masks overlap; exact ties go to the front region),
+`region_lock_*` (latent identity anchoring), `base_loras_exclude_regions`,
+and `unmaskable_layers` (policy for LoRA layers with no spatial token axis
+— timestep/modulation embedders from newer trainers: "skip" keeps them out
+of region LoRAs, "apply globally" keeps their full effect image-wide).
+Takes the builder's outputs; returns a patched `MODEL` and combined
+`CONDITIONING`.
+
+**Krea 2 - Regional Detailer** — optional second pass that fixes identity
+bleed and likeness *after* generation. See
+[Regional Detailer](#regional-detailer-second-pass-identity-fix) below.
 
 **Krea 2 Empty Latent Image** — an rgthree-style empty latent sized for
 Krea 2's Qwen-Image VAE (16-channel, /16 dims, 1K–2K native range).
@@ -133,6 +147,48 @@ Some soft bleed through the shared base prompt is inherent to single-pass
 regional attention — it's also what keeps seams coherent. For absolute
 separation, ComfyUI's native ConditioningSetMask multi-pass approach remains
 an option at N-times the step cost.
+
+## Regional Detailer (second-pass identity fix)
+
+When subjects drift out of their boxes or a character's likeness gets
+diluted where masks overlap, **Krea 2 - Regional Detailer** repairs it
+after the fact: it finds where each subject *actually* landed, re-samples
+just that subject at high resolution with its region's prompt and LoRAs at
+full (ungated) strength, and composites it back through the subject's own
+silhouette — so a neighbour's arm inside the box is never repainted with
+the wrong identity.
+
+Wiring, after your KSampler → VAE Decode:
+
+1. Run the decoded image through any subject detector — SAM3 (prompt
+   "person") or Impact Pack's Ultralytics person/face detectors both work.
+2. Wire the image, the detector's masks into `detection_masks` (or its
+   SEGS into `segs`), your **base** `MODEL` (not Apply Regional's output),
+   your `VAE`, and the Builder's `regions` and `base_conditioning` (the
+   Builder's own output, not Apply Regional's combined conditioning).
+3. Detections are matched to regions by overlap, with a bounded
+   nearest-centre rescue for subjects that drifted out of their box.
+   Unmatched regions are left untouched.
+
+Settings that matter: `denoise` 0.2–0.3 (0.25 default) tightens likeness
+while keeping pose; 0.35+ starts recomposing inside the silhouette. Keep
+`shift` on "model default" — Krea 2 **Turbo** is distilled at a fixed mu
+and must inherit the first pass's schedule; the per-crop "auto" mode is
+for **RAW** only. Fewer `steps` (4–6) is often smoother than 8 for a
+partial-denoise pass. With no detector connected the node falls back to
+cropping by the region boxes themselves — fine for well-separated
+subjects, bleed-prone when they overlap, so prefer detection mode for
+multi-character images.
+
+## Compatibility notes
+
+- Requires a ComfyUI build with native Krea 2 support (v0.26+); the 1.2.0
+  release is tested against ComfyUI 0.29–0.30.
+- The canvas builder targets ComfyUI's standard graph renderer. If the
+  canvas misrenders under the experimental "Nodes 2.0" rendering mode, try
+  disabling that setting (several DOM-widget-heavy node packs are
+  affected).
+- Video VAEs (WanVAE) are supported end to end, including in the Detailer.
 
 ## LoRA formats
 
