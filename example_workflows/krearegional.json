@@ -1,8 +1,8 @@
 {
   "id": "c638d001-55d4-4cde-82d1-c0da6ab409b3",
   "revision": 0,
-  "last_node_id": 10423,
-  "last_link_id": 420574,
+  "last_node_id": 10424,
+  "last_link_id": 420577,
   "nodes": [
     {
       "id": 10283,
@@ -58,7 +58,7 @@
       "widgets_values": [
         "krea\\Krea2_Raw_convrot_int8mixed.safetensors",
         "qwen3vl_4b_fp8_scaled.safetensors",
-        "wan_2.1_vae.safetensors"
+        "qwen_image_vae.safetensors"
       ],
       "color": "#323",
       "bgcolor": "#535"
@@ -251,7 +251,7 @@
         }
       },
       "widgets_values": [
-        82042916913009,
+        1028270807870240,
         "randomize"
       ],
       "color": "#232",
@@ -357,7 +357,7 @@
         339.42394149994266
       ],
       "flags": {},
-      "order": 23,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -404,7 +404,7 @@
         154
       ],
       "flags": {},
-      "order": 22,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -454,7 +454,7 @@
         106
       ],
       "flags": {},
-      "order": 20,
+      "order": 21,
       "mode": 0,
       "inputs": [
         {
@@ -743,7 +743,7 @@
         126
       ],
       "flags": {},
-      "order": 15,
+      "order": 16,
       "mode": 0,
       "inputs": [
         {
@@ -806,7 +806,7 @@
       "flags": {
         "pinned": true
       },
-      "order": 12,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -844,8 +844,7 @@
           "type": "CONDITIONING",
           "links": [
             420290,
-            420304,
-            420571
+            420304
           ]
         }
       ],
@@ -889,7 +888,7 @@
       "flags": {
         "pinned": true
       },
-      "order": 13,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -903,8 +902,7 @@
           "name": "CONDITIONING",
           "type": "CONDITIONING",
           "links": [
-            420243,
-            420570
+            420243
           ]
         }
       ],
@@ -936,7 +934,7 @@
       "flags": {
         "pinned": true
       },
-      "order": 14,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -1011,6 +1009,328 @@
       "bgcolor": "#335"
     },
     {
+      "id": 10331,
+      "type": "DarkroomSpectralFilmStock",
+      "pos": [
+        2254.1287039345316,
+        901.9571403897197
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 420565
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            420437,
+            420564
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-darkroom",
+        "ver": "1.10.0",
+        "Node name for S&R": "DarkroomSpectralFilmStock",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "C41 Still / Fuji C200 -> Fuji Crystal Archive DPII",
+        0.1
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 10416,
+      "type": "PreviewImage",
+      "pos": [
+        947.591066528314,
+        1883.6133513253867
+      ],
+      "size": [
+        273.37523016309774,
+        258
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 420558
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "sam visuals",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.2",
+        "Node name for S&R": "PreviewImage",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 10422,
+      "type": "Image Comparer (rgthree)",
+      "pos": [
+        1506.1839557883306,
+        1496.321569895825
+      ],
+      "size": [
+        728.4319525278224,
+        567.1138784776465
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "dir": 3,
+          "name": "image_a",
+          "type": "IMAGE",
+          "link": 420563
+        },
+        {
+          "dir": 3,
+          "name": "image_b",
+          "type": "IMAGE",
+          "link": 420564
+        }
+      ],
+      "outputs": [
+        {
+          "dir": 4,
+          "name": "images",
+          "shape": 3,
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "detailer/after effects",
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "738105af5fb14e96fbecaf406dc356e284797e8c",
+        "comparer_mode": "Slide",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_dubnq_00011_.png&type=temp&subfolder=&rand=0.45983832154100945"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_dubnq_00012_.png&type=temp&subfolder=&rand=0.5239028180090981"
+          }
+        ]
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 10421,
+      "type": "Image Comparer (rgthree)",
+      "pos": [
+        1504.428757451795,
+        891.2780332184477
+      ],
+      "size": [
+        729.5611882362823,
+        567.4828723378541
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "dir": 3,
+          "name": "image_a",
+          "type": "IMAGE",
+          "link": 420562
+        },
+        {
+          "dir": 3,
+          "name": "image_b",
+          "type": "IMAGE",
+          "link": 420572
+        }
+      ],
+      "outputs": [
+        {
+          "dir": 4,
+          "name": "images",
+          "shape": 3,
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Before/after detailer",
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "738105af5fb14e96fbecaf406dc356e284797e8c",
+        "comparer_mode": "Slide",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_atmif_00011_.png&type=temp&subfolder=&rand=0.28166978993891023"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_atmif_00012_.png&type=temp&subfolder=&rand=0.07194508789611842"
+          }
+        ]
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 10418,
+      "type": "Krea2RegionalDetailer",
+      "pos": [
+        1225.5087907547443,
+        1617.8094738774703
+      ],
+      "size": [
+        264.44586696535043,
+        686
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 420566
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 420567
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 420569
+        },
+        {
+          "name": "regions",
+          "type": "KREA2_REGIONS",
+          "link": 420568
+        },
+        {
+          "name": "detection_masks",
+          "shape": 7,
+          "type": "MASK",
+          "link": 420559
+        },
+        {
+          "name": "segs",
+          "shape": 7,
+          "type": "SEGS",
+          "link": null
+        },
+        {
+          "name": "base_conditioning",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 420575
+        },
+        {
+          "name": "negative",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 420577
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            420563,
+            420565,
+            420572
+          ]
+        },
+        {
+          "name": "applied_masks",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "januspluto/ComfyUI-Krea2-Regional",
+        "ver": "7916e2d77d4485e8a83f8c2114a2a220e1bbbf95",
+        "Node name for S&R": "Krea2RegionalDetailer",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        580036361222884,
+        "randomize",
+        2,
+        1,
+        "euler",
+        "beta",
+        0.25,
+        0.25,
+        1024,
+        24,
+        0,
+        "model default"
+      ],
+      "color": "#009933",
+      "bgcolor": "#653"
+    },
+    {
       "id": 10338,
       "type": "Krea2RegionalBuilder",
       "pos": [
@@ -1068,7 +1388,9 @@
           "name": "base_conditioning",
           "type": "CONDITIONING",
           "links": [
-            420358
+            420358,
+            420575,
+            420576
           ]
         },
         {
@@ -1126,7 +1448,7 @@
         "digital illustration, anime-inspired style",
         "",
         "when empty",
-        "{\"regions\":[{\"shape\":\"rect\",\"x\":0.148,\"y\":0,\"w\":0.352,\"h\":0.813,\"desc\":\"Kim Possible with red hair wearing a purple top rides a yellow surfboard, wearing red shoes and an orange scarf.\",\"rtype\":\"obj\",\"text\":\"\",\"loras\":[{\"name\":\"krea\\\\Krea 2 - Kim Possible.safetensors\",\"strength\":1}]},{\"shape\":\"rect\",\"x\":0.563,\"y\":0,\"w\":0.31200000000000006,\"h\":0.75,\"desc\":\"TifaLockhart, rides a red surfboard, wearing a white cropped tank top with black harness straps, black leather shorts\",\"rtype\":\"obj\",\"text\":\"\",\"loras\":[{\"name\":\"krea\\\\Tifa-L-800_000003200.safetensors\",\"strength\":1}]}],\"base_loras\":[],\"grid\":{\"guide\":\"grid\",\"n\":16,\"snap\":true}}",
+        "{\"regions\":[{\"shape\":\"poly\",\"x\":0.148,\"y\":0,\"w\":0.352,\"h\":0.813,\"desc\":\"Kim Possible with red hair wearing a purple top rides a yellow surfboard, wearing red shoes and an orange scarf.\",\"rtype\":\"obj\",\"text\":\"\",\"loras\":[{\"name\":\"krea\\\\Krea 2 - Kim Possible.safetensors\",\"strength\":1}],\"points\":[[0.28444585740222833,0.12393627192909974],[0.41867714717967397,0.1954937780495348],[0.4809493950145714,0.3366748036385013],[0.43113159674665347,0.5436113753921918],[0.5,0.813],[0.44081839085430413,0.8917289727348489],[0.28167820194289955,0.8801250528234269],[0.19726471043337188,0.8762570795196196],[0.148,0.813],[0.09901294162720033,0.725406120671135],[0.0782555256822345,0.6132348948607232],[0.10454825254585788,0.46044994936033484],[0.12253801303149492,0.35214669685373046],[0.15159839535444708,0.23223952443570414],[0.17927494994773482,0.14327613844813625]]},{\"shape\":\"rect\",\"x\":0.563,\"y\":0,\"w\":0.31200000000000006,\"h\":0.75,\"desc\":\"TifaLockhart, rides a red surfboard, wearing a white cropped tank top with black harness straps, black leather shorts\",\"rtype\":\"obj\",\"text\":\"\",\"loras\":[{\"name\":\"krea\\\\Tifa-L-800_000003200.safetensors\",\"strength\":1}]}],\"base_loras\":[],\"grid\":{\"guide\":\"grid\",\"n\":16,\"snap\":false}}",
         "position hints",
         ""
       ],
@@ -1134,328 +1456,48 @@
       "bgcolor": "#355"
     },
     {
-      "id": 10331,
-      "type": "DarkroomSpectralFilmStock",
+      "id": 10424,
+      "type": "ConditioningZeroOut",
       "pos": [
-        2254.1287039345316,
-        901.9571403897197
+        1230.272158746563,
+        2344.817280606882
       ],
       "size": [
-        210,
-        82
+        264.94229590716463,
+        26
       ],
       "flags": {},
-      "order": 18,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 420565
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 420576
         }
       ],
       "outputs": [
         {
-          "name": "image",
-          "type": "IMAGE",
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
           "links": [
-            420437,
-            420564
+            420577
           ]
         }
       ],
       "properties": {
-        "cnr_id": "comfyui-darkroom",
-        "ver": "1.10.0",
-        "Node name for S&R": "DarkroomSpectralFilmStock",
         "ue_properties": {
           "widget_ue_connectable": {},
           "input_ue_unconnectable": {},
           "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "C41 Still / Fuji C200 -> Fuji Crystal Archive DPII",
-        0.1
-      ],
-      "color": "#323",
-      "bgcolor": "#535"
-    },
-    {
-      "id": 10418,
-      "type": "Krea2RegionalDetailer",
-      "pos": [
-        1233.1960146215763,
-        1623.2441623786722
-      ],
-      "size": [
-        264.44586696535043,
-        686
-      ],
-      "flags": {
-        "pinned": true
-      },
-      "order": 16,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 420566
         },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 420567
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 420569
-        },
-        {
-          "name": "regions",
-          "type": "KREA2_REGIONS",
-          "link": 420568
-        },
-        {
-          "name": "detection_masks",
-          "shape": 7,
-          "type": "MASK",
-          "link": 420559
-        },
-        {
-          "name": "segs",
-          "shape": 7,
-          "type": "SEGS",
-          "link": null
-        },
-        {
-          "name": "base_conditioning",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 420571
-        },
-        {
-          "name": "negative",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 420570
-        }
-      ],
-      "outputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "links": [
-            420563,
-            420565,
-            420572
-          ]
-        },
-        {
-          "name": "applied_masks",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "aux_id": "januspluto/ComfyUI-Krea2-Regional",
-        "ver": "7916e2d77d4485e8a83f8c2114a2a220e1bbbf95",
-        "Node name for S&R": "Krea2RegionalDetailer",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        1025864828886087,
-        "randomize",
-        2,
-        1,
-        "euler",
-        "beta",
-        0.25,
-        0.25,
-        1024,
-        24,
-        0,
-        "model default"
-      ],
-      "color": "#009933",
-      "bgcolor": "#653"
-    },
-    {
-      "id": 10416,
-      "type": "PreviewImage",
-      "pos": [
-        947.591066528314,
-        1883.6133513253867
-      ],
-      "size": [
-        273.37523016309774,
-        258
-      ],
-      "flags": {},
-      "order": 17,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 420558
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "title": "sam visuals",
-      "properties": {
         "cnr_id": "comfy-core",
-        "ver": "0.30.2",
-        "Node name for S&R": "PreviewImage",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
+        "ver": "0.27.0",
+        "Node name for S&R": "ConditioningZeroOut"
       },
-      "widgets_values": []
-    },
-    {
-      "id": 10422,
-      "type": "Image Comparer (rgthree)",
-      "pos": [
-        1506.1839557883306,
-        1496.321569895825
-      ],
-      "size": [
-        728.4319525278224,
-        567.1138784776465
-      ],
-      "flags": {},
-      "order": 21,
-      "mode": 0,
-      "inputs": [
-        {
-          "dir": 3,
-          "name": "image_a",
-          "type": "IMAGE",
-          "link": 420563
-        },
-        {
-          "dir": 3,
-          "name": "image_b",
-          "type": "IMAGE",
-          "link": 420564
-        }
-      ],
-      "outputs": [
-        {
-          "dir": 4,
-          "name": "images",
-          "shape": 3,
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "title": "detailer/after effects",
-      "properties": {
-        "cnr_id": "rgthree-comfy",
-        "ver": "738105af5fb14e96fbecaf406dc356e284797e8c",
-        "comparer_mode": "Slide",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        [
-          {
-            "name": "A",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_dubnq_00005_.png&type=temp&subfolder=&rand=0.5277993716653668"
-          },
-          {
-            "name": "B",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_dubnq_00006_.png&type=temp&subfolder=&rand=0.407291600535594"
-          }
-        ]
-      ],
-      "color": "#323",
-      "bgcolor": "#535"
-    },
-    {
-      "id": 10421,
-      "type": "Image Comparer (rgthree)",
-      "pos": [
-        1504.428757451795,
-        891.2780332184477
-      ],
-      "size": [
-        729.5611882362823,
-        567.4828723378541
-      ],
-      "flags": {},
-      "order": 19,
-      "mode": 0,
-      "inputs": [
-        {
-          "dir": 3,
-          "name": "image_a",
-          "type": "IMAGE",
-          "link": 420562
-        },
-        {
-          "dir": 3,
-          "name": "image_b",
-          "type": "IMAGE",
-          "link": 420572
-        }
-      ],
-      "outputs": [
-        {
-          "dir": 4,
-          "name": "images",
-          "shape": 3,
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "title": "Before/after detailer",
-      "properties": {
-        "cnr_id": "rgthree-comfy",
-        "ver": "738105af5fb14e96fbecaf406dc356e284797e8c",
-        "comparer_mode": "Slide",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        [
-          {
-            "name": "A",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_atmif_00005_.png&type=temp&subfolder=&rand=0.8576743747648167"
-          },
-          {
-            "name": "B",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_atmif_00006_.png&type=temp&subfolder=&rand=0.7670428361588211"
-          }
-        ]
-      ],
-      "color": "#323",
-      "bgcolor": "#535"
+      "widgets_values": [],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -1732,22 +1774,6 @@
       "VAE"
     ],
     [
-      420570,
-      10297,
-      0,
-      10418,
-      7,
-      "CONDITIONING"
-    ],
-    [
-      420571,
-      10315,
-      1,
-      10418,
-      6,
-      "CONDITIONING"
-    ],
-    [
       420572,
       10418,
       0,
@@ -1762,6 +1788,30 @@
       10417,
       0,
       "IMAGE"
+    ],
+    [
+      420575,
+      10338,
+      1,
+      10418,
+      6,
+      "CONDITIONING"
+    ],
+    [
+      420576,
+      10338,
+      1,
+      10424,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      420577,
+      10424,
+      0,
+      10418,
+      7,
+      "CONDITIONING"
     ]
   ],
   "groups": [
@@ -1772,12 +1822,10 @@
         -83.84309832114141,
         813.5511783812138,
         2563.028700674646,
-        1522.065880344814
+        1567.266102225668
       ],
       "color": "#3f789e",
-      "flags": {
-        "pinned": true
-      }
+      "flags": {}
     },
     {
       "id": 279,
@@ -1801,8 +1849,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 279,
-          "lastNodeId": 10423,
-          "lastLinkId": 420574,
+          "lastNodeId": 10424,
+          "lastLinkId": 420577,
           "lastRerouteId": 151
         },
         "revision": 0,
@@ -2125,8 +2173,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 279,
-          "lastNodeId": 10423,
-          "lastLinkId": 420574,
+          "lastNodeId": 10424,
+          "lastLinkId": 420577,
           "lastRerouteId": 151
         },
         "revision": 0,
@@ -2657,8 +2705,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 279,
-          "lastNodeId": 10423,
-          "lastLinkId": 420574,
+          "lastNodeId": 10424,
+          "lastLinkId": 420577,
           "lastRerouteId": 151
         },
         "revision": 0,
@@ -2997,10 +3045,10 @@
     "VHS_MetadataImage": true,
     "VHS_KeepIntermediate": true,
     "ds": {
-      "scale": 0.6934334949443565,
+      "scale": 0.6303940863130569,
       "offset": [
-        -88.9794274129381,
-        -1005.5479293753235
+        2182.909274652782,
+        -490.5553374454016
       ]
     }
   },
