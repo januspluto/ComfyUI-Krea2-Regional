@@ -362,11 +362,19 @@ def _exclusive_soft(soft):
     """Winner-take-all where region masks overlap on the token grid: each
     image token keeps only its strongest region. Stops two grown/feathered
     boxes from double-applying LoRAs (and sharing attention) in the gap
-    between them."""
+    between them.
+
+    Depth priority: where strengths are (near-)equal — the common case of
+    two hard masks overlapping at 1.0 — the EARLIER region in the list wins
+    (top of the Builder's region list = front). Ties are resolved by EQUALITY (first region at the exact
+    maximum wins); any genuine strength difference, however small, wins
+    outright — no epsilon bias distorting real comparisons."""
     if soft.shape[0] < 2:
         return soft
+    mx = soft.max(dim=0, keepdim=True).values
     winner = torch.zeros_like(soft, dtype=torch.bool)
-    winner.scatter_(0, soft.argmax(dim=0, keepdim=True), True)
+    winner.scatter_(0, (soft == mx).float().argmax(dim=0, keepdim=True),
+                    True)
     return soft * winner
 
 
@@ -517,6 +525,25 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
     if transformer_options is None:
         transformer_options = {}
     bundle = transformer_options.get(BUNDLE_KEY)
+    if bundle is not None and not transformer_options.get(CONSUMED_KEY):
+        # Krea 2 native reference latents append reference-image tokens to
+        # the image sequence: the txt_total check below still passes, but
+        # region masks would silently misalign. Fail loudly instead.
+        ref = kwargs.get("ref_latents")
+        if ref is None:
+            for a in rest:
+                if isinstance(a, (list, tuple)) and len(a) > 0 \
+                        and torch.is_tensor(a[0]):
+                    ref = a
+                    break
+        if ref is not None and len(ref) > 0:
+            raise RuntimeError(
+                "[Krea2Regional] Krea 2 native reference latents are not "
+                "supported together with regional attention / regional "
+                "LoRA routing yet: reference tokens extend the image "
+                "sequence and would silently bypass region masks. Bypass "
+                "Apply Regional for the reference pass, or drop the "
+                "reference image input.")
     if (
         bundle is None
         or context is None
@@ -954,7 +981,18 @@ class Krea2ApplyRegional:
                                "restricted for the whole run (classic). "
                                "0.4-0.6 is a good cohesion sweet spot."}),
             },
-            "optional": {"base_loras": ("KREA2_LORAS",)},
+            "optional": {
+                "base_loras": ("KREA2_LORAS",),
+                "unmaskable_layers": (["skip", "apply globally"],
+                    {"default": "skip",
+                     "tooltip": "Some LoRA layers (timestep/modulation "
+                                "embedders from newer trainers) have no "
+                                "spatial token axis and can't be region-"
+                                "masked. 'skip' drops them from REGION "
+                                "LoRAs (safest for isolation); 'apply "
+                                "globally' keeps their full effect but it "
+                                "touches the whole image."}),
+            },
         }
 
     RETURN_TYPES = ("MODEL", "CONDITIONING")
@@ -994,7 +1032,8 @@ class Krea2ApplyRegional:
         for ridx, region in enumerate(regions):
             for entry in region["loras"]:
                 uid = f"k2r{next(_UID)}"
-                n = _inject_lora(m, entry["sd"], uid, entry["strength"])
+                n = _inject_lora(m, entry["sd"], uid, entry["strength"],
+                                 unmaskable=unmaskable_layers)
                 logging.info("[Krea2Regional] region %d lora '%s': %d layers",
                              ridx, entry["label"], n)
                 lora_specs.append({"uid": uid, "weight": 1.0, "seg": ridx + 1,

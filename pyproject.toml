@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-krea2-regional"
 description = "Regional prompting and per-region LoRA for Krea 2 in ComfyUI (single-pass)."
-version = "1.0.0"
+version = "1.2.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"

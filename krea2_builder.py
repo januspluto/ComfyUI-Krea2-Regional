@@ -24,11 +24,11 @@ import re
 import torch
 
 try:
-    from .caption_utils import (_encode, _extract_lora_tags,
+    from .caption_utils import (_encode, _extract_lora_tags, normalize_builder_state,
                                   _load_lora_entry, _loads_caption,
                                   _poly_mask, _rect_mask)
 except ImportError:  # standalone (tests)
-    from caption_utils import (_encode, _extract_lora_tags,
+    from caption_utils import (_encode, _extract_lora_tags, normalize_builder_state,
                                  _load_lora_entry, _loads_caption,
                                  _poly_mask, _rect_mask)
 
@@ -189,6 +189,27 @@ def _layout_hint(r, prompt):
     return f"in the {zone} of the image, {scale}: {short}"
 
 
+def _dedup_loras(entries):
+    """Deduplicate loaded LoRA entries by resolved file, keep-first.
+
+    Assembly order encodes precedence (Builder selection, then
+    extra_base_loras, then inline <lora:...> tags), so the first entry for
+    a file wins; later duplicates are dropped, with a note when their
+    strength differed."""
+    seen, out = {}, []
+    for e in entries:
+        key = e.get("path") or e.get("label")
+        if key in seen:
+            if abs(seen[key] - float(e.get("strength", 1.0))) > 1e-6:
+                logging.info("[Krea2Regional] duplicate lora '%s': keeping "
+                             "strength %.2f, dropping %.2f", e.get("label"),
+                             seen[key], float(e.get("strength", 1.0)))
+            continue
+        seen[key] = float(e.get("strength", 1.0))
+        out.append(e)
+    return out
+
+
 def _entries(rows):
     out = []
     for r in rows or []:
@@ -274,8 +295,7 @@ class Krea2RegionalBuilder:
             logging.warning("[Krea2Regional] regions_data is corrupt; "
                             "starting empty.")
             state = {}
-        state.setdefault("regions", [])
-        state.setdefault("base_loras", [])
+        state = normalize_builder_state(state)
 
         fields, base_extra, imported = {}, [], False
         if import_json and import_json.strip():
@@ -284,6 +304,7 @@ class Krea2RegionalBuilder:
                                     or not state["regions"]):
                 keep_brightness = state.get("bg_brightness")
                 state, fields, base_extra = _caption_to_state(cap)
+                state = normalize_builder_state(state)
                 if keep_brightness is not None:
                     state["bg_brightness"] = keep_brightness
                 imported = True
@@ -331,8 +352,9 @@ class Krea2RegionalBuilder:
             mask = _region_mask(r, width, height, grow_px, feather_px)
             if mask is None:
                 continue
-            loras = _entries(r.get("loras")) + _entries(
-                [{"name": n, "strength": s} for n, s in tags])
+            loras = _dedup_loras(
+                _entries(r.get("loras")) + _entries(
+                    [{"name": n, "strength": s} for n, s in tags]))
             if region_append.strip():
                 prompt += ", " + region_append.strip()
             cond = _encode(clip, prompt)
@@ -387,8 +409,8 @@ class Krea2RegionalBuilder:
             base_text = ". ".join(sentences) or "an image"
         base_cond = _encode(clip, base_text)
 
-        base_loras = list(extra_base_loras or []) + _entries(
-            state["base_loras"])
+        base_loras = _dedup_loras(
+            _entries(state["base_loras"]) + list(extra_base_loras or []))
 
         all_regions = list(prev_regions or []) + regions
         mask_batch = (torch.stack(masks) if masks

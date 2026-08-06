@@ -232,6 +232,13 @@ class Builder {
         this.domWidget.computeSize = (w) => [w, this.height(w)];
 
         this.hookDims();
+        // refit the canvas live while the node's resize corner is dragged
+        const prevResize = node.onResize;
+        const self = this;
+        node.onResize = function (size) {
+            prevResize?.call(this, size);
+            requestAnimationFrame(() => self.redraw());
+        };
         this.hostRO = new ResizeObserver(() =>
             requestAnimationFrame(() => this.redraw()));
         this.hostRO.observe(this.host);
@@ -366,10 +373,17 @@ class Builder {
 
     height(width) {
         if (this.float) return 34;
-        const [, canvasH] = this.measure();
+        const avail = (typeof width === "number" && width > 0)
+            ? width - 22 : undefined;
+        const [, canvasH] = this.measure(avail);
+        // real toolbar heights — the button rows wrap at narrow widths, so
+        // a hardcoded estimate overflows the node bottom
+        const bars = (this.bar1?.offsetHeight || 0) +
+                     (this.bar2?.offsetHeight || 0);
+        const chrome = bars > 0 ? bars + 8 : 52;
         const ph = Math.min(this.panel.scrollHeight || 0, 230);
         const bh = Math.min(this.basePanel.scrollHeight || 0, 150);
-        return 52 + canvasH + ph + bh + 18;
+        return chrome + canvasH + ph + bh + 18;
     }
 
     relayout() {
@@ -772,6 +786,7 @@ class Builder {
             img.onload = () => {
                 this.execBg = img;
                 this.preferExec = true;
+                this.relayout();
                 this.redraw();
             };
             img.src = url;
@@ -808,10 +823,18 @@ class Builder {
     }
 
     // ---------------- canvas ----------------
-    measure() {
+    measure(availW) {
+        // Docked: size off the NODE width (graph units) — passed in by
+        // computeSize during a resize drag, else read from node.size.
+        // host.clientWidth is the on-screen DOM width: it shrinks with
+        // zoom-out, grows with zoom-in, and reads 0 mid-layout, so it must
+        // never participate in docked sizing (it fed both a shrink loop
+        // after Grab BG and an overflow at zoom-in).
         const parentW = this.float
             ? this.float.clientWidth - 18
-            : (this.host.clientWidth || this.node.size[0] - 22);
+            : (typeof availW === "number" && availW > 0
+                ? availW
+                : (this.node.size?.[0] || 380) - 22);
         const [W, H] = this.dims();
         const cw = Math.max(parentW - 2, 180);   // -2 for the canvas border
         const maxH = this.float
@@ -826,6 +849,15 @@ class Builder {
     }
 
     fit() {
+        // pin the whole root to the node-derived width: ComfyUI's DOM
+        // widget wrapper doesn't reliably give percentage children a
+        // definite width, so "width:100%" panels collapse. Explicit px
+        // (graph units, transform-scaled by the frontend) makes the
+        // toolbars/panels span the node exactly like the canvas.
+        const rootW = this.float
+            ? this.float.clientWidth - 18
+            : (this.node.size?.[0] || 380) - 22;
+        this.root.style.width = rootW + "px";
         const [cw, ch] = this.measure();
         // hysteresis: scrollbars appearing/disappearing shift clientWidth by
         // a few px — don't rescale everyone's boxes over that
@@ -900,8 +932,45 @@ class Builder {
                 ctx.closePath();
                 ctx.fill();
                 ctx.stroke();
-                const [bx0, by0] = polyBBox(r.points);
+                const [bx0, by0, bx1, by1] = polyBBox(r.points);
                 lx = bx0 * cw; ly = by0 * chh;
+                if (i === this.sel) {
+                    // scale handles: squares pushed outside the bbox so
+                    // they don't sit on top of vertices
+                    ctx.fillStyle = c;
+                    for (const [hx, hy] of [
+                            [bx0 * cw - 10, by0 * chh - 10],
+                            [bx1 * cw + 10, by0 * chh - 10],
+                            [bx0 * cw - 10, by1 * chh + 10],
+                            [bx1 * cw + 10, by1 * chh + 10]])
+                        ctx.fillRect(hx - 4, hy - 4, 8, 8);
+                    // vertex handles: circles on the outline
+                    ctx.strokeStyle = "#fff";
+                    ctx.lineWidth = 1;
+                    for (const [vx, vy] of r.points) {
+                        ctx.beginPath();
+                        ctx.arc(vx * cw, vy * chh, 3.5, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.stroke();
+                    }
+                    // midpoint (insert) handles: hollow circles — press
+                    // and drag one to split the edge with a new vertex
+                    ctx.lineWidth = 1.5;
+                    ctx.globalAlpha = 0.8;
+                    const np = r.points.length;
+                    for (let v2 = 0; v2 < np; v2++) {
+                        const [ax, ay] = r.points[v2];
+                        const [bx2, by2] = r.points[(v2 + 1) % np];
+                        ctx.beginPath();
+                        ctx.arc(((ax + bx2) / 2) * cw,
+                                ((ay + by2) / 2) * chh,
+                                3, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                    ctx.globalAlpha = 1;
+                    ctx.strokeStyle = c;
+                    ctx.lineWidth = 2.5;
+                }
             } else {
                 const x = r.x * cw, y = r.y * chh,
                       w = r.w * cw, h = r.h * chh;
@@ -944,9 +1013,35 @@ class Builder {
 
     hit(px, py) {
         const hx = 10 / this.canvas.width, hy = 10 / this.canvas.height;
-        // corner handles of the selected rect first
+        // handles of the selected region first: poly vertices, then bbox
+        // scale corners (offset OUTSIDE the bbox for polys so they don't
+        // collide with vertices of a freshly-converted rectangle)
         const s = this.state.regions[this.sel];
-        if (s && s.shape !== "poly") {
+        if (s && s.shape === "poly" && s.points?.length >= 3) {
+            for (let vi = 0; vi < s.points.length; vi++) {
+                const [vx, vy] = s.points[vi];
+                if (Math.abs(px - vx) < hx && Math.abs(py - vy) < hy)
+                    return { i: this.sel, mode: "vertex", vi };
+            }
+            // edge midpoints: pressing one inserts a vertex there
+            const np = s.points.length;
+            for (let vi = 0; vi < np; vi++) {
+                const [ax, ay] = s.points[vi];
+                const [bx2, by2] = s.points[(vi + 1) % np];
+                const mx = (ax + bx2) / 2, my = (ay + by2) / 2;
+                if (Math.abs(px - mx) < hx && Math.abs(py - my) < hy)
+                    return { i: this.sel, mode: "midpoint", vi };
+            }
+            const [x0, y0, x1, y1] = polyBBox(s.points);
+            const ox = 10 / this.canvas.width,
+                  oy = 10 / this.canvas.height;
+            const pc = [
+                ["tl", x0 - ox, y0 - oy], ["tr", x1 + ox, y0 - oy],
+                ["bl", x0 - ox, y1 + oy], ["br", x1 + ox, y1 + oy]];
+            for (const [name, cx, cy] of pc)
+                if (Math.abs(px - cx) < hx && Math.abs(py - cy) < hy)
+                    return { i: this.sel, mode: "resize", corner: name };
+        } else if (s && s.shape !== "poly") {
             const corners = [
                 ["tl", s.x, s.y], ["tr", s.x + s.w, s.y],
                 ["bl", s.x, s.y + s.h], ["br", s.x + s.w, s.y + s.h]];
@@ -977,9 +1072,46 @@ class Builder {
             if (h) {
                 this.sel = h.i;
                 const r = this.state.regions[h.i];
+                // pressing a midpoint handle: split the edge with a new
+                // vertex and let the drag continue as a vertex drag
+                if (h.mode === "midpoint") {
+                    const np = r.points.length;
+                    const [ax, ay] = r.points[h.vi];
+                    const [bx2, by2] = r.points[(h.vi + 1) % np];
+                    r.points.splice(h.vi + 1, 0,
+                                    [(ax + bx2) / 2, (ay + by2) / 2]);
+                    h.mode = "vertex";
+                    h.vi = h.vi + 1;
+                }
+                // alt-click a lasso vertex: delete it (min 3 stay)
+                if (h.mode === "vertex" && ev.altKey) {
+                    if (r.points.length > 3) {
+                        r.points.splice(h.vi, 1);
+                        this.commit();
+                    }
+                    this.refreshPanels();
+                    this.redraw();
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    return;
+                }
+                // for polys, x/y/w/h in the drag snapshot hold the bbox so
+                // the resize anchor math is shared with rects
+                let bx = r.x, by = r.y, bw = r.w, bh = r.h;
+                if (r.shape === "poly" && r.points?.length) {
+                    const [x0, y0, x1, y1] = polyBBox(r.points);
+                    bx = x0; by = y0; bw = x1 - x0; bh = y1 - y0;
+                }
+                // pointer-to-corner offset so offset/edge-grabbed handles
+                // don't make the box jump to the cursor
+                let cox = 0, coy = 0;
+                if (h.mode === "resize") {
+                    cox = px - (h.corner.includes("l") ? bx : bx + bw);
+                    coy = py - (h.corner.includes("t") ? by : by + bh);
+                }
                 this.drag = {
-                    mode: h.mode, corner: h.corner, px, py,
-                    x: r.x, y: r.y, w: r.w, h: r.h,
+                    mode: h.mode, corner: h.corner, vi: h.vi, px, py,
+                    cox, coy, x: bx, y: by, w: bw, h: bh,
                     points: r.points ? r.points.map((p) => [...p]) : null,
                 };
             } else if (this.tool === "lasso") {
@@ -1030,16 +1162,35 @@ class Builder {
                     r.x = Math.min(Math.max(this.drag.x + dx, 0), 1 - r.w);
                     r.y = Math.min(Math.max(this.drag.y + dy, 0), 1 - r.h);
                 }
+            } else if (this.drag.mode === "vertex") {
+                if (r.shape === "poly" && r.points?.[this.drag.vi])
+                    r.points[this.drag.vi] = [
+                        Math.min(Math.max(px, 0), 1),
+                        Math.min(Math.max(py, 0), 1)];
             } else if (this.drag.mode === "resize") {
                 // anchor = the corner opposite the grabbed one
                 const ax = this.drag.corner.includes("l")
                     ? this.drag.x + this.drag.w : this.drag.x;
                 const ay = this.drag.corner.includes("t")
                     ? this.drag.y + this.drag.h : this.drag.y;
-                r.x = Math.max(0, Math.min(ax, px));
-                r.y = Math.max(0, Math.min(ay, py));
-                r.w = Math.max(0.02, Math.min(Math.abs(px - ax), 1 - r.x));
-                r.h = Math.max(0.02, Math.min(Math.abs(py - ay), 1 - r.y));
+                const rpx = this.snap(pxr - (this.drag.cox || 0));
+                const rpy = this.snap(pyr - (this.drag.coy || 0));
+                const nx = Math.max(0, Math.min(ax, rpx));
+                const ny = Math.max(0, Math.min(ay, rpy));
+                const nw = Math.max(0.02,
+                    Math.min(Math.abs(rpx - ax), 1 - nx));
+                const nh = Math.max(0.02,
+                    Math.min(Math.abs(rpy - ay), 1 - ny));
+                if (r.shape === "poly" && this.drag.points) {
+                    // affine remap of the points: old bbox -> new bbox
+                    const ow = Math.max(this.drag.w, 1e-6);
+                    const oh = Math.max(this.drag.h, 1e-6);
+                    r.points = this.drag.points.map(([x, y]) => [
+                        nx + ((x - this.drag.x) / ow) * nw,
+                        ny + ((y - this.drag.y) / oh) * nh]);
+                } else {
+                    r.x = nx; r.y = ny; r.w = nw; r.h = nh;
+                }
             }
             this.redraw();
         });
@@ -1071,6 +1222,31 @@ class Builder {
             this.drag = null;
             this.commit();
             this.relayout();
+        });
+        c.addEventListener("dblclick", (ev) => {
+            // double-click near an edge of the selected lasso: insert vertex
+            const r = this.state.regions[this.sel];
+            if (!r || r.shape !== "poly" || !(r.points?.length >= 3)) return;
+            const [px, py] = this.pos(ev);
+            const thX = 8 / this.canvas.width, thY = 8 / this.canvas.height;
+            let best = -1, bestD = Infinity;
+            const n = r.points.length;
+            for (let s2 = 0; s2 < n; s2++) {
+                const [ax, ay] = r.points[s2];
+                const [bx, by] = r.points[(s2 + 1) % n];
+                const dx = bx - ax, dy = by - ay;
+                const len2 = dx * dx + dy * dy || 1e-12;
+                let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                t = Math.max(0, Math.min(1, t));
+                const d = Math.hypot((px - (ax + t * dx)) / thX,
+                                     (py - (ay + t * dy)) / thY);
+                if (d < bestD) { bestD = d; best = s2; }
+            }
+            if (best >= 0 && bestD <= 1) {   // within ~8px of an edge
+                r.points.splice(best + 1, 0, [px, py]);
+                this.commit();
+            }
+            ev.preventDefault();
         });
         c.addEventListener("keydown", (ev) => {
             if ((ev.key === "Delete" || ev.key === "Backspace") && this.sel >= 0) {
@@ -1281,6 +1457,11 @@ class Builder {
     }
 
     regionList(host) {
+        if (this.state.regions.length > 1)
+            host.append(el("div", { opacity: 0.45, fontSize: "10px",
+                                    marginTop: "2px" },
+                { textContent: "order = depth · top is front and wins " +
+                               "overlaps" }));
         this.state.regions.forEach((r, i) => {
             const c = COLORS[i % COLORS.length];
             const row = el("div", { display: "flex", gap: "6px",
@@ -1292,6 +1473,23 @@ class Builder {
                 { flex: "1", overflow: "hidden", whiteSpace: "nowrap",
                   textOverflow: "ellipsis" },
                 { textContent: this.regionLabel(r, i) }));
+            const swap = (j) => {
+                const a = this.state.regions;
+                if (j < 0 || j >= a.length) return;
+                [a[i], a[j]] = [a[j], a[i]];
+                if (this.sel === i) this.sel = j;
+                else if (this.sel === j) this.sel = i;
+                this.commit(); this.relayout();
+            };
+            const up = el("button", { ...S.btn, padding: "0 4px" },
+                { textContent: "↑", title: "bring forward " +
+                  "(wins overlaps with regions below it)" });
+            up.onclick = (ev) => { ev.stopPropagation(); swap(i - 1); };
+            const dn = el("button", { ...S.btn, padding: "0 4px" },
+                { textContent: "↓", title: "send backward" });
+            dn.onclick = (ev) => { ev.stopPropagation(); swap(i + 1); };
+            if (i === 0) up.style.opacity = "0.3";
+            if (i === this.state.regions.length - 1) dn.style.opacity = "0.3";
             const del = el("button", S.btn, { textContent: "✕" });
             del.onclick = (ev) => {
                 ev.stopPropagation();
@@ -1303,7 +1501,7 @@ class Builder {
                 this.sel = i;
                 this.refreshPanels(); this.redraw();
             };
-            row.append(del);
+            row.append(up, dn, del);
             host.append(row);
         });
     }
@@ -1335,6 +1533,32 @@ class Builder {
                 r.rtype = "text"; this.commit(); this.relayout();
             };
             head.append(objBtn, txtBtn);
+            // rect <-> lasso conversion for the selected region
+            const shpBtn = el("button", S.btn,
+                r.shape === "poly"
+                    ? { textContent: "▭ rect",
+                        title: "convert this lasso region to its " +
+                               "bounding rectangle" }
+                    : { textContent: "✎ lasso",
+                        title: "convert this rectangle to a lasso polygon " +
+                               "(drag vertices, dbl-click an edge to " +
+                               "add one, alt-click one to remove it)" });
+            shpBtn.onclick = () => {
+                if (r.shape === "poly") {
+                    const [x0, y0, x1, y1] = polyBBox(r.points || []);
+                    r.shape = "rect";
+                    r.x = x0; r.y = y0;
+                    r.w = Math.max(0.02, x1 - x0);
+                    r.h = Math.max(0.02, y1 - y0);
+                    delete r.points;
+                } else {
+                    r.points = [[r.x, r.y], [r.x + r.w, r.y],
+                                [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
+                    r.shape = "poly";
+                }
+                this.commit(); this.relayout();
+            };
+            head.append(shpBtn);
             const back = el("button", { ...S.btn, marginLeft: "auto" },
                             { textContent: "list" });
             back.onclick = () => {
@@ -1380,6 +1604,25 @@ class Builder {
         }
         this.loraSection("Base LoRAs (whole image)",
                          this.state.base_loras, this.basePanel);
+        this.syncHeight();
+    }
+
+    // Panel content just changed (region list <-> region editor, lora rows
+    // added/removed...). scrollHeight/offsetHeight are only trustworthy
+    // after the browser lays the new DOM out, so re-check the node height
+    // one frame later — with a dead-band so it can't oscillate.
+    syncHeight() {
+        if (this.float) return;
+        cancelAnimationFrame(this._shRAF);
+        this._shRAF = requestAnimationFrame(() => {
+            const sz = this.node.computeSize();
+            const target = Math.max(sz[1], 120);
+            if (Math.abs(this.node.size[1] - target) > 4) {
+                this.node.setSize([Math.max(this.node.size[0], 380),
+                                   target]);
+                this.node.setDirtyCanvas(true, true);
+            }
+        });
     }
 
     // ---------------- execution feedback ----------------
@@ -1416,7 +1659,9 @@ class Builder {
                 `&type=${im.type}&subfolder=${encodeURIComponent(im.subfolder || "")}` +
                 `&t=${Date.now()}`);
             const img = new Image();
-            img.onload = () => { this.execBg = img; this.redraw(); };
+            img.onload = () => {
+                this.execBg = img; this.relayout(); this.redraw();
+            };
             img.src = url;
         }
         this.redraw();

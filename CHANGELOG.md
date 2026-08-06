@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.2.0 — 2026-08-06
+
+Peer-reviewed feature release: subject-aware Regional Detailer, full lasso
+editing, explicit depth ordering, and a hardening pass across state
+handling, LoRA caching, and overlap semantics.
+
+### New node: Krea 2 - Regional Detailer
+
+- Subject-aware refinement pass run after the first sampler + VAE decode.
+  Feed it subject silhouettes from any detector (`detection_masks` MASK
+  batch from SAM3 etc., or Impact Pack `segs` — duck-typed, no
+  dependency): detections are matched to Builder regions by containment x
+  coverage with a bounded nearest-center rescue for drifted subjects, each
+  subject is cropped around its detected bbox, resampled with that
+  region's prompt conditioning and LoRAs applied plainly, and composited
+  back through the detected silhouette (grown + feathered). Only each
+  subject's own pixels are repainted. Regions without a matching subject
+  are left untouched; a connected detector yielding no masks aborts loudly
+  instead of silently falling back to box mode. Box mode remains available
+  when no detector is connected (bleed-prone with overlapping subjects —
+  see tooltip).
+- Latent noise-mask anchoring: the silhouette constrains every sampling
+  step, not just the final composite. Crop context always comes from the
+  immutable first-pass image.
+- Upscale-only, aspect-preserving crop sizing (subjects larger than
+  `detail_size` sample at native resolution — no softness seam); 5-D
+  video-VAE decodes (WanVAE) handled like core VAEDecode; per-subject
+  timing logged.
+- `shift` option: default "model default" inherits the initial image's
+  sigma schedule (recommended, and required for Krea 2 Turbo which is
+  distilled at fixed mu). "auto (RAW only, per-crop)" recomputes mu from
+  Krea 2 RAW's 256-1280px token endpoints, clamped, reusing the model's
+  own sampling object. Default denoise 0.25.
+- Recommended wiring: Builder `base_conditioning` (not Apply Regional's
+  combined output) into the detailer's `base_conditioning`.
+
+### Builder
+
+- Lasso regions are fully editable: drag vertices (filled circles),
+  press-drag an edge midpoint (hollow circles) to split the edge with a
+  new vertex pen-tool style, double-click an edge to insert, alt-click a
+  vertex to delete (min 3). Bbox scale handles sit just outside the box
+  and affine-remap all points; grab-offset compensated.
+- Rect <-> lasso conversion button on the selected region.
+- Region list is explicit front-to-back depth with up/down reorder
+  buttons; top of the list is front and wins overlaps.
+- Layout overhaul: canvas and node size finally agree. Sizing is driven by
+  node width in graph units (zoom-dependent DOM width no longer
+  participates), the width LiteGraph passes during resize drags is
+  honored, toolbar chrome height is measured (wrapped button rows),
+  the root container is pinned so panels/toolbars span the node, the
+  canvas refits live during resize drags, and panel rebuilds schedule a
+  settled-DOM height sync — no more shrink loops, overflow at zoom, or
+  the region editor hanging past the node bottom.
+
+### Apply Regional / backend
+
+- `unmaskable_layers` is now actually exposed (optional widget, default
+  "skip") and forwarded to region-LoRA injection; it was implemented but
+  dead plumbing. Base LoRAs keep prior behavior.
+- Krea 2 native reference latents are rejected with a clear error while
+  regional routing is active — reference tokens extend the image sequence
+  past the region masks and previously bypassed restrictions silently.
+- Overlap resolution: exact ties deterministically go to the front
+  (earlier) region via equality-based selection; genuine strength
+  differences of any size win outright. (Interim epsilon-bias approach
+  removed after review.)
+
+### State & caching hardening
+
+- Centralized `normalize_builder_state` gate on every state entry point
+  (widget JSON, caption import): malformed rects/polys, non-finite
+  numbers, wrong-typed fields and junk rows are skipped with warnings
+  instead of crashing; coordinates clamped; unknown fields preserved.
+- LoRA state-dict cache is a bounded LRU (6 entries) keyed by resolved
+  file identity (path, mtime, size): replacing a file invalidates its
+  entry; `clear_lora_cache()` exported. Duplicate LoRAs are deduplicated
+  after path resolution, keep-first precedence: Builder selection >
+  `extra_base_loras` > inline `<lora:...>` tags. Note: base-lora assembly
+  order flipped to make this precedence hold; if the same file appeared in
+  both, the Builder's strength now wins (logged).
+
+
 ## 1.1.0
 
 - **Scheduled restrict** (`restrict_end_percent` on Apply Regional): keep

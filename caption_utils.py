@@ -168,7 +168,19 @@ def _poly_mask(points, width, height, grow_px, feather_px):
 #        * => detail_boost @ 0.5
 
 _LORA_TAG_RE = re.compile(r"<lora:([^:>]+?)(?::([-\d.]+))?>", re.IGNORECASE)
-_LORA_SD_CACHE: dict[str, dict] = {}
+# LoRA state-dict cache: bounded LRU keyed by resolved file IDENTITY
+# (path, mtime_ns, size), so replacing a file on disk invalidates its
+# entry and aliases/alternate paths of the same file share one slot.
+from collections import OrderedDict as _OrderedDict
+
+_LORA_SD_CACHE: "_OrderedDict[tuple, dict]" = _OrderedDict()
+_LORA_CACHE_MAX = 6
+
+
+def clear_lora_cache():
+    """Drop all cached LoRA state dicts (e.g. after refreshing model
+    folders or replacing files)."""
+    _LORA_SD_CACHE.clear()
 
 
 def _extract_lora_tags(text: str):
@@ -197,6 +209,115 @@ def _parse_lora_map(text: str):
                 name = rhs
         rules.append((matcher.strip(), name.strip(), strength))
     return rules
+
+
+def _finite(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _clamp01(v):
+    return min(max(v, 0.0), 1.0)
+
+
+def _normalize_lora_rows(v):
+    """Lora rows from state JSON -> list of {name:str, strength:float, ...};
+    malformed rows dropped."""
+    out = []
+    if isinstance(v, list):
+        for e in v:
+            if not isinstance(e, dict):
+                continue
+            name = e.get("name") if isinstance(e.get("name"), str) \
+                else (e.get("label") if isinstance(e.get("label"), str)
+                      else None)
+            if not name or not name.strip():
+                continue
+            row = dict(e)
+            row["name"] = name
+            st = _finite(e.get("strength", 1.0))
+            row["strength"] = st if st is not None else 1.0
+            out.append(row)
+    return out
+
+
+def normalize_builder_state(raw):
+    """Single validation/normalization gate for Builder state.
+
+    Every state entry point (widget JSON, caption import, migrations) goes
+    through here. Guarantees: dict root; `regions` and `base_loras` lists;
+    each region a dict with a valid shape — rects have four finite,
+    clamped, positive-area x/y/w/h; polys have >=3 finite clamped points
+    (bbox fields recomputed); desc/text coerced to str; rtype in
+    {obj, text}; lora rows normalized. Malformed entries are skipped with
+    a warning instead of crashing the node. Unknown fields are preserved.
+    """
+    if not isinstance(raw, dict):
+        if raw not in (None, "", [], {}):
+            logging.warning("[Krea2Regional] builder state root is %s, "
+                            "expected object — starting empty.",
+                            type(raw).__name__)
+        raw = {}
+    out = dict(raw)
+    regions_in = raw.get("regions")
+    if regions_in is not None and not isinstance(regions_in, list):
+        logging.warning("[Krea2Regional] builder state 'regions' is %s, "
+                        "expected list — ignored.",
+                        type(regions_in).__name__)
+        regions_in = []
+    kept, skipped = [], 0
+    for r in regions_in or []:
+        if not isinstance(r, dict):
+            skipped += 1
+            continue
+        r = dict(r)
+        r["desc"] = str(r.get("desc") or "")
+        if "text" in r:
+            r["text"] = str(r.get("text") or "")
+        if r.get("rtype") not in ("obj", "text"):
+            r["rtype"] = "obj"
+        r["loras"] = _normalize_lora_rows(r.get("loras"))
+        if r.get("shape") == "poly":
+            good = []
+            for p in (r.get("points") or []):
+                if isinstance(p, (list, tuple)) and len(p) == 2:
+                    x, y = _finite(p[0]), _finite(p[1])
+                    if x is not None and y is not None:
+                        good.append([_clamp01(x), _clamp01(y)])
+            if len(good) < 3:
+                skipped += 1
+                continue
+            r["points"] = good
+            xs = [p[0] for p in good]
+            ys = [p[1] for p in good]
+            r["x"], r["y"] = min(xs), min(ys)
+            r["w"] = max(xs) - min(xs)
+            r["h"] = max(ys) - min(ys)
+        else:
+            vals = [_finite(r.get(k)) for k in ("x", "y", "w", "h")]
+            if any(v is None for v in vals):
+                skipped += 1
+                continue
+            x, y, w, h = vals
+            x, y = _clamp01(x), _clamp01(y)
+            w = min(max(w, 0.0), 1.0 - x)
+            h = min(max(h, 0.0), 1.0 - y)
+            if w <= 0.0 or h <= 0.0:
+                skipped += 1
+                continue
+            r["shape"] = "rect"
+            r.update(x=x, y=y, w=w, h=h)
+            r.pop("points", None)
+        kept.append(r)
+    if skipped:
+        logging.warning("[Krea2Regional] builder state: kept %d region(s), "
+                        "skipped %d malformed.", len(kept), skipped)
+    out["regions"] = kept
+    out["base_loras"] = _normalize_lora_rows(raw.get("base_loras"))
+    return out
 
 
 def _resolve_lora_name(name: str):
@@ -231,12 +352,27 @@ def _load_lora_entry(name: str, strength: float):
         logging.warning("[Krea2Regional] lora '%s' not found in models/loras "
                         "(or ambiguous) — skipped.", name)
         return None
-    if resolved not in _LORA_SD_CACHE:
-        path = folder_paths.get_full_path_or_raise("loras", resolved)
-        _LORA_SD_CACHE[resolved] = comfy.utils.load_torch_file(path,
-                                                               safe_load=True)
-    return {"sd": _LORA_SD_CACHE[resolved], "strength": strength,
-            "label": resolved}
+    import os
+
+    path = folder_paths.get_full_path_or_raise("loras", resolved)
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (path, 0, 0)
+    sd = _LORA_SD_CACHE.get(key)
+    if sd is None:
+        # evict stale entries for this file (edited/replaced on disk)
+        for k in [k for k in _LORA_SD_CACHE if k[0] == path]:
+            del _LORA_SD_CACHE[k]
+        sd = comfy.utils.load_torch_file(path, safe_load=True)
+        _LORA_SD_CACHE[key] = sd
+        while len(_LORA_SD_CACHE) > _LORA_CACHE_MAX:
+            _LORA_SD_CACHE.popitem(last=False)
+    else:
+        _LORA_SD_CACHE.move_to_end(key)
+    return {"sd": sd, "strength": strength,
+            "label": resolved, "path": path}
 
 
 def _loras_for_region(idx0, desc, inline_tags, rules):

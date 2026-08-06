@@ -5,15 +5,19 @@ from .krea2_latent import (LATENT_NODE_CLASS_MAPPINGS,
                            LATENT_NODE_DISPLAY_NAME_MAPPINGS)
 from .ideogram_bridge import (BRIDGE_NODE_CLASS_MAPPINGS,
                               BRIDGE_NODE_DISPLAY_NAME_MAPPINGS)
+from .krea2_detailer import (DETAILER_NODE_CLASS_MAPPINGS,
+                             DETAILER_NODE_DISPLAY_NAME_MAPPINGS)
 
 NODE_CLASS_MAPPINGS = {**NODE_CLASS_MAPPINGS,
                        **BUILDER_NODE_CLASS_MAPPINGS,
                        **LATENT_NODE_CLASS_MAPPINGS,
-                       **BRIDGE_NODE_CLASS_MAPPINGS}
+                       **BRIDGE_NODE_CLASS_MAPPINGS,
+                       **DETAILER_NODE_CLASS_MAPPINGS}
 NODE_DISPLAY_NAME_MAPPINGS = {**NODE_DISPLAY_NAME_MAPPINGS,
                               **BUILDER_NODE_DISPLAY_NAME_MAPPINGS,
                               **LATENT_NODE_DISPLAY_NAME_MAPPINGS,
-                              **BRIDGE_NODE_DISPLAY_NAME_MAPPINGS}
+                              **BRIDGE_NODE_DISPLAY_NAME_MAPPINGS,
+                              **DETAILER_NODE_DISPLAY_NAME_MAPPINGS}
 
 try:  # registers HTTP routes for the builder's LoRA info panel
     from . import server_routes  # noqa: F401
