@@ -156,6 +156,90 @@ def _center(mask):
     return float(xs.float().mean()), float(ys.float().mean())
 
 
+def _mask_area(mask, thresh=0.5):
+    return int((mask > thresh).sum().item())
+
+
+def _bbox_area(bbox):
+    if bbox is None:
+        return 0
+    return max(0, int(bbox[2] - bbox[0])) * max(0, int(bbox[3] - bbox[1]))
+
+
+def _head_focus_mask(mask, head_height_frac=0.38, top_margin_frac=0.02,
+                     min_height_px=64):
+    """Heuristic head/upper-face focus mask from a subject mask.
+
+    Intended for large full-body detections where a whole-subject resample is
+    too destructive. The output keeps only the upper head/face area, then the
+    normal grow/feather path expands it slightly for hair and edges.
+    """
+    bbox = _mask_bbox(mask)
+    if bbox is None:
+        return mask
+    x0, y0, x1, y1 = bbox
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
+
+    head_h = max(int(round(bh * head_height_frac)),
+                 min(min_height_px, bh), 1)
+    head_y0 = max(y0, min(y1 - 1, int(round(y0 + bh * top_margin_frac))))
+    head_y1 = min(y1, head_y0 + head_h)
+    if head_y1 <= head_y0:
+        return mask
+
+    sub = (mask[head_y0:head_y1, x0:x1] > 0.5)
+    ys, xs = torch.where(sub)
+    if xs.numel() == 0:
+        focus = torch.zeros_like(mask)
+        focus[head_y0:head_y1, x0:x1] = mask[head_y0:head_y1, x0:x1]
+        return focus.clamp(0, 1)
+
+    # Centre horizontally on the actual upper-subject pixels, but keep some
+    # shoulder/hair width instead of collapsing to a tiny face-only strip.
+    left = int(xs.min()) + x0
+    right = int(xs.max()) + x0 + 1
+    upper_w = max(1, right - left)
+    cx = float(xs.float().mean()) + x0
+    target_w = max(upper_w, int(round(bw * 0.58)), 64)
+    hx0 = max(x0, int(round(cx - target_w / 2.0)))
+    hx1 = min(x1, hx0 + target_w)
+    hx0 = max(x0, hx1 - target_w)
+
+    focus = torch.zeros_like(mask)
+    box = torch.zeros_like(mask)
+    box[head_y0:head_y1, hx0:hx1] = 1.0
+    focus = (mask.clamp(0, 1) * box).clamp(0, 1)
+    if _mask_area(focus) < 64:
+        # If the subject mask is sparse in the head area (e.g. imperfect
+        # detector), fall back to the box itself rather than skipping.
+        focus = box
+    return focus.clamp(0, 1)
+
+
+def _resolve_detail_mask(mask, mode, image_area,
+                         auto_face_bbox_frac=0.18,
+                         auto_skip_bbox_frac=0.60,
+                         head_height_frac=0.38):
+    """Return (resolved_mask, strategy_label) for detailing."""
+    bbox = _mask_bbox(mask)
+    if bbox is None:
+        return None, "empty"
+    bbox_frac = _bbox_area(bbox) / float(max(image_area, 1))
+
+    if mode == "full region":
+        return mask.clamp(0, 1), "full"
+    if mode == "face/head only":
+        return _head_focus_mask(mask, head_height_frac=head_height_frac), "head"
+
+    # auto
+    if bbox_frac >= auto_skip_bbox_frac:
+        return None, "skip"
+    if bbox_frac >= auto_face_bbox_frac:
+        return _head_focus_mask(mask, head_height_frac=head_height_frac), "head"
+    return mask.clamp(0, 1), "full"
+
+
 def _match_detections(dets, region_masks):
     """Greedy 1:1 assignment: region index -> detection mask (or None).
 
@@ -241,13 +325,12 @@ class Krea2RegionalDetailer:
                                   "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "denoise": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0,
+                "denoise": ("FLOAT", {"default": 0.18, "min": 0.0, "max": 1.0,
                     "step": 0.01,
-                    "tooltip": "How much to redraw per subject. With shift "
-                               "on auto the schedule is correctly "
-                               "calibrated, so values bite harder than "
-                               "before: 0.2-0.25 tightens likeness while "
-                               "keeping pose/composition stable; 0.35+ "
+                    "tooltip": "How much to redraw per subject. Lower "
+                               "values are safer for the new auto mode: "
+                               "0.12-0.18 is a conservative clean-up pass; "
+                               "0.2-0.25 pushes harder on likeness; 0.35+ "
                                "starts recomposing inside the mask."}),
             },
             "optional": {
@@ -290,6 +373,27 @@ class Krea2RegionalDetailer:
                                 "Krea 2 RAW's resolution-derived mu. "
                                 "Do not use auto with Turbo: Turbo was "
                                 "distilled at fixed mu=1.15."}),
+                "detail_target": (["auto", "full region", "face/head only"], {
+                    "default": "auto",
+                    "tooltip": "Auto is the new safe default: small regions "
+                               "detail normally, large character/full-body "
+                               "regions detail only the face/head area, and "
+                               "huge regions are skipped to avoid a second "
+                               "full regeneration pass."}),
+                "auto_face_bbox_frac": ("FLOAT", {"default": 0.18, "min": 0.02,
+                    "max": 1.0, "step": 0.01,
+                    "tooltip": "Auto mode: if a region bbox covers at least "
+                               "this fraction of the full image, switch from "
+                               "full-region detailing to face/head-only."}),
+                "auto_skip_bbox_frac": ("FLOAT", {"default": 0.60, "min": 0.05,
+                    "max": 1.0, "step": 0.01,
+                    "tooltip": "Auto mode: if a region bbox covers at least "
+                               "this fraction of the full image, skip it "
+                               "entirely unless you force full region."}),
+                "head_height_frac": ("FLOAT", {"default": 0.38, "min": 0.10,
+                    "max": 0.80, "step": 0.01,
+                    "tooltip": "When face/head-only is used, keep roughly "
+                               "this top fraction of the subject bbox."}),
             },
         }
 
@@ -302,7 +406,10 @@ class Krea2RegionalDetailer:
                sampler_name, scheduler, denoise, detection_masks=None,
                segs=None, base_conditioning=None, negative=None,
                crop_padding=0.25, detail_size=1024, feather_px=24,
-               mask_grow_px=8, shift="model default"):
+               mask_grow_px=8, shift="model default", detail_target="auto",
+               auto_face_bbox_frac=0.18, auto_skip_bbox_frac=0.60,
+               head_height_frac=0.38):
+
         B, H, W, _ = image.shape
         union = torch.zeros(B, H, W)
         if not regions or denoise <= 0.0:
@@ -361,7 +468,16 @@ class Krea2RegionalDetailer:
                         continue  # subject not found: leave pixels alone
                 else:
                     m = region_mask
-                bbox = _mask_bbox(m)
+                resolved_mask, strategy = _resolve_detail_mask(
+                    m, detail_target, H * W,
+                    auto_face_bbox_frac=auto_face_bbox_frac,
+                    auto_skip_bbox_frac=auto_skip_bbox_frac,
+                    head_height_frac=head_height_frac)
+                if resolved_mask is None:
+                    logging.info("[Krea2Detailer] region %d skipped by %s "
+                                 "target policy", ridx + 1, detail_target)
+                    continue
+                bbox = _mask_bbox(resolved_mask)
                 if bbox is None:
                     continue
                 x0, y0, x1, y1 = bbox
@@ -372,11 +488,17 @@ class Krea2RegionalDetailer:
                 if cw < 16 or ch < 16:
                     continue
 
-                # upscale-only: sampling a large subject BELOW its
-                # native resolution returns it softer than the pixels
-                # around it (visible quality seam). Aspect is preserved by
-                # deriving th from the rounded tw, not rounding both.
-                scale = max(1.0, detail_size / float(max(cw, ch)))
+                # Resolution cap: when the crop's longer side exceeds
+                # detail_size, sample at detail_size and bicubic-upscale the
+                # result back to crop size. At low denoise (<=0.30) the base
+                # pixels dominate, so the quality seam from sub-native
+                # sampling is negligible. This is the single biggest
+                # speedup for large subjects (e.g. 1440x2160 -> 1024).
+                longer = max(cw, ch)
+                if longer > detail_size:
+                    scale = detail_size / float(longer)  # < 1.0: downscale
+                else:
+                    scale = max(1.0, detail_size / float(longer))
                 tw = _round16(cw * scale)
                 th = _round16(tw * ch / cw)
                 # Always take context from the immutable first-pass image.
@@ -389,7 +511,7 @@ class Krea2RegionalDetailer:
                 # pixel composite. Without a latent noise mask the entire
                 # padded crop is re-noised, so Krea can reinterpret pose and
                 # surroundings even though those pixels are discarded later.
-                sample_mm = m[y0:y1, x0:x1]
+                sample_mm = resolved_mask[y0:y1, x0:x1]
                 grow = mask_grow_px if detection_mode else 0
                 if grow > 0 or feather_px > 0:
                     sample_mm = _grow_feather(sample_mm, grow, feather_px)
@@ -445,9 +567,9 @@ class Krea2RegionalDetailer:
                     det * mm4 + out[b:b + 1, y0:y1, x0:x1, :3] * (1 - mm4)
                 union[b, y0:y1, x0:x1] = torch.maximum(
                     union[b, y0:y1, x0:x1], mm.clamp(0, 1).cpu())
-                logging.info("[Krea2Detailer] region %d: %dx%d crop "
+                logging.info("[Krea2Detailer] region %d (%s): %dx%d crop "
                              "sampled at %dx%d in %.1fs", ridx + 1,
-                             cw, ch, tw, th, _time.time() - _t0)
+                             strategy, cw, ch, tw, th, _time.time() - _t0)
 
         return (out, union)
 

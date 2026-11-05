@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.1 — 2026-11-05
+
+### Regional Builder
+
+- Restore and stabilize canvas attachment, image preview, box editing, and prompt-panel sizing.
+- Make High-level description, Background, Aesthetics, Lighting, and Medium independently resizable; preserve their sizes and values when workflows are saved or restored.
+- Fix Clear to reset all five prompt fields, region append text, region boxes, and base LoRAs.
+- Fix Copy/Paste for caption/layout JSON, raw regions, and plain text in focused prompt fields.
+- Keep caption imports, execution feedback, and visible textareas synchronized with serialized widget values; isolate text-entry shortcuts from graph shortcuts.
+- Improve builder discoverability: report regions skipped for empty prompts and clarify canvas background loading.
+
+### Regional generation and references
+
+- Support native Krea2 reference latents with the `[text | target | references]` attention layout, including reference-aware masks, LoRA gates, and caches (issue #3).
+- Make reference tokens available as global context while keeping regional LoRA deltas off those reference tokens.
+- Improve stability for repeated sampling with DynamicVRAM/AIMDO via the `regional safe` model-management option.
+- Update Apply Regional defaults: `exclusive_masks=false`, `adaptive_masks=refine boxes`, `adaptive_steps=2`, `adaptive_threshold=0.85`, `region_lock_strength=0.35`, `region_lock_start=0.25`, `region_lock_end=0.70`, `restrict_end_percent=1.0`, `dynamic_vram_mode=regional safe`, and `unmaskable_layers=apply globally`.
+
+### Regional Detailer
+
+- Make `detail_target=auto` safer for large/full-body subjects by limiting their refinement to an estimated head area, with a skip threshold for very large regions.
+- Lower the default denoise to `0.18` for a more conservative second pass.
+
+### Tests and documentation
+
+- Add regression coverage for native Krea2 references, builder prompt synchronization, and Detailer auto targeting.
+- Refresh user-facing documentation and installation guidance.
+
 ## 1.2.0 — 2026-08-06
 
 Peer-reviewed feature release: subject-aware Regional Detailer, full lasso

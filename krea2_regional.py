@@ -49,13 +49,17 @@ class _Ctx:
     def __init__(self):
         self.token_masks: dict[str, torch.Tensor] = {}  # uid -> (B, L, 1)
         self.txtlen = 0
+        # Total image-sequence tokens seen by token-axis Linears:
+        # live target tokens + any native Krea2 reference tokens.
         self.imglen = 0
+        self.reflen = 0
         self.txtlayers = -1
 
     def clear(self):
         self.token_masks = {}
         self.txtlen = 0
         self.imglen = 0
+        self.reflen = 0
         self.txtlayers = -1
 
 
@@ -431,24 +435,46 @@ def _finalize_adaptive(aff, base_soft, mode, threshold, h, w, grow=2):
     return soft
 
 
-def _build_allow(segments, region_img_hard, imglen, restrict_img_attn, device):
-    """(L, L) bool, True = may attend. segments: list of (start, end) text spans;
-    segments[0] is the base prompt. region_img_hard: (R, imglen) bool."""
+def _build_allow(segments, region_img_hard, imglen, restrict_img_attn, device,
+                 reflen=0):
+    """Build the joint attention allow-mask.
+
+    Native ComfyUI Krea2 lays the joint sequence out as::
+
+        [text | live target image | native reference image token(s)]
+
+    ``imglen`` is the LIVE target span only. ``reflen`` is the optional
+    appended native-reference span. References are deliberately treated as
+    global context in this first compatibility implementation: every prompt
+    and every target token may communicate with them. Regional isolation still
+    applies to target<->prompt and (when enabled) target<->target routing.
+    This preserves stock native-reference semantics while avoiding any false
+    claim that a reference has been assigned to one Builder region.
+    """
     txtlen = segments[-1][1]
-    L = txtlen + imglen
-    i0, i1 = txtlen, txtlen + imglen
+    L = txtlen + imglen + reflen
+    i0, i1 = txtlen, txtlen + imglen          # live target span
+    r0, r1 = i1, i1 + reflen                  # appended native refs
     allow = torch.zeros(L, L, dtype=torch.bool, device=device)
 
     for s, e in segments:  # prompts are mutually isolated
         allow[s:e, s:e] = True
 
-    b0, b1 = segments[0]  # base prompt <-> every image token
-    allow[b0:b1, i0:i1] = True
-    allow[i0:i1, b0:b1] = True
+    # Base prompt is global scene context: target + native refs.
+    b0, b1 = segments[0]
+    allow[b0:b1, i0:r1] = True
+    allow[i0:r1, b0:b1] = True
 
     for r, (s, e) in enumerate(segments[1:]):
+        # Existing regional prompt <-> target routing remains unchanged.
         allow[s:e, i0:i1] |= region_img_hard[r][None, :]
         allow[i0:i1, s:e] |= region_img_hard[r][:, None]
+        # Native references are global carriers, matching stock Krea2's
+        # unrestricted reference behavior. Region-specific ref assignment is
+        # intentionally a separate future feature.
+        if reflen:
+            allow[s:e, r0:r1] = True
+            allow[r0:r1, s:e] = True
 
     if restrict_img_attn and region_img_hard.shape[0] > 0:
         shared = (region_img_hard.T.float() @ region_img_hard.float()) > 0
@@ -456,8 +482,15 @@ def _build_allow(segments, region_img_hard, imglen, restrict_img_attn, device):
         img_allow = shared | bg[None, :] | bg[:, None]
         img_allow |= torch.eye(imglen, dtype=torch.bool, device=device)
         allow[i0:i1, i0:i1] = img_allow
+        if reflen:
+            # References remain globally readable even while target regions
+            # are isolated from one another. This is the conservative
+            # compatibility policy; refs can therefore be a semantic bridge.
+            allow[i0:i1, r0:r1] = True
+            allow[r0:r1, i0:i1] = True
+            allow[r0:r1, r0:r1] = True
     else:
-        allow[i0:i1, i0:i1] = True
+        allow[i0:r1, i0:r1] = True
 
     txt_allow = torch.zeros(txtlen, txtlen, dtype=torch.bool, device=device)
     for s, e in segments:
@@ -465,11 +498,19 @@ def _build_allow(segments, region_img_hard, imglen, restrict_img_attn, device):
     return allow, txt_allow
 
 
-def _build_token_masks(bundle, segments, soft_masks, imglen, batch_rows, device):
-    """Per-adapter (B, L, 1) masks. batch_rows: list of bool, True = regional
-    (cond) rows, False = rows that must run the clean base model."""
+def _build_token_masks(bundle, segments, soft_masks, imglen, batch_rows, device,
+                       reflen=0):
+    """Per-adapter token masks for ``[text | target | refs]``.
+
+    Regional LoRAs NEVER act on native-reference tokens: the clean reference
+    representation should not be rewritten by a character/style adapter meant
+    for a target region. Base/global LoRAs retain their existing global
+    semantics and therefore also cover references.
+    """
     txtlen = segments[-1][1]
-    L = txtlen + imglen
+    L = txtlen + imglen + reflen
+    target0, target1 = txtlen, txtlen + imglen
+    ref0, ref1 = target1, target1 + reflen
     row = {}
 
     def bump(uid, vec):
@@ -480,36 +521,210 @@ def _build_token_masks(bundle, segments, soft_masks, imglen, batch_rows, device)
             spec["uid"], spec["weight"], spec["seg"], spec["mask_idx"],
         )
         vec = torch.zeros(L, device=device)
-        if mask_idx is None:  # global (base) lora: whole prompt + whole image
+        if mask_idx is None:  # global/base LoRA
             vec[:txtlen] = weight
             if (bundle.get("base_loras_exclude_regions")
                     and soft_masks.shape[0] > 0):
-                # style/base loras skin everything EXCEPT the subject regions
                 union = soft_masks.max(dim=0).values
-                vec[txtlen:] = weight * (1.0 - union)
+                vec[target0:target1] = weight * (1.0 - union)
             else:
-                vec[txtlen:] = weight
+                vec[target0:target1] = weight
+            if reflen:
+                vec[ref0:ref1] = weight
         else:
-            vec[txtlen:] = soft_masks[mask_idx] * weight
+            # Target-only spatial gate. Reference tokens stay exactly zero.
+            vec[target0:target1] = soft_masks[mask_idx] * weight
             if seg_idx is not None:
                 s, e = segments[seg_idx]
-                vec[s:e] = weight  # trigger words go through the LoRA too
+                vec[s:e] = weight
         bump(uid, vec)
 
     out = {}
     if all(batch_rows):
         for uid, vec in row.items():
-            out[uid] = vec[None, :, None]  # (1, L, 1) -> broadcasts to any batch
+            out[uid] = vec[None, :, None]
     else:
         rows = torch.tensor(batch_rows, device=device, dtype=torch.float32)
         for uid, vec in row.items():
-            out[uid] = (rows[:, None] * vec[None, :])[:, :, None]  # (B, L, 1)
+            out[uid] = (rows[:, None] * vec[None, :])[:, :, None]
     return out
 
 
 # ---------------------------------------------------------------------------
 # The diffusion-model wrapper (WrappersMP.DIFFUSION_MODEL)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------#
+# Masked-attention strategy ladder (ported from sd-forge-krea2-regional).
+#
+# The one thing we NEVER do is let sdpa's silent math-backend fallback run:
+# it materializes B*H*L*L fp32 attention (~15 GB/block at 1744x1248) and
+# turns steps into half-minutes.  We probe each strategy once per sequence
+# length and cache the winner:
+#   1. fused sdpa + fp16 additive bias (what the efficient kernel wants)
+#   2. fused sdpa + bool mask (half the memory of an additive float mask
+#      and keeps sdpa's fused kernels eligible at large sequence lengths)
+#   3. hand-tiled attention: exact, bounded memory, eligibility-proof
+# ---------------------------------------------------------------------------#
+
+_MASK_MODE: dict = {}       # (L, device, dtype) -> "add" | "bool" | "tiled"
+_ADD_CACHE: dict = {}       # (id(mask), dtype) -> additive fp bias
+
+
+def _additive_mask(mask: torch.Tensor, dtype) -> torch.Tensor:
+    """Convert a bool mask to an additive fp bias (finfo.min at masked spots)."""
+    key = (id(mask), dtype)
+    got = _ADD_CACHE.get(key)
+    if got is None or got.device != mask.device:
+        _ADD_CACHE.clear()
+        neg = torch.finfo(dtype).min if dtype.is_floating_point else -1e9
+        got = torch.zeros(
+            mask.shape, dtype=dtype, device=mask.device
+        ).masked_fill_(~mask, neg)
+        _ADD_CACHE[key] = got
+    return got
+
+
+def _tiled_attention(q, k, v, mask, tile=1024):
+    """Exact masked attention in query tiles: bounded transient memory
+    (~B*H*tile*L scores), low-precision matmuls, fp32 softmax via the
+    fused dtype arg (no separate fp32 materialization). Immune to sdpa
+    kernel-eligibility heuristics."""
+    B, H, L, D = q.shape
+    scale = D ** -0.5
+    kt = k.transpose(-1, -2).contiguous()
+    out = torch.empty_like(q)
+    neg = torch.finfo(q.dtype).min
+    for s in range(0, L, tile):
+        e = min(s + tile, L)
+        scores = torch.matmul(q[:, :, s:e], kt)
+        scores.mul_(scale)
+        mt = mask[:, :, s:e] if mask.shape[2] == L else mask
+        scores.masked_fill_(~mt, neg)
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
+        out[:, :, s:e] = torch.matmul(probs.to(v.dtype), v)
+    return out
+
+
+def _fused_sdpa(q, k, v, heads, mask):
+    """Run fused sdpa with explicit kernel selection (exclude cudnn: several
+    torch builds accept attn_mask on the cudnn backend and silently IGNORE it
+    — regional isolation vanishes while everything looks fast and healthy)."""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    try:
+        from comfy.sd import attention_function as _apt
+    except Exception:
+        from comfy.sd import attention_pytorch as _apt
+    with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION,
+                      SDPBackend.FLASH_ATTENTION]):
+        return _apt(q, k, v, heads, mask=mask, skip_reshape=True)
+
+
+def _mask_efficacy_ok(fn_name, dtype, device):
+    """Prove the candidate path actually APPLIES masks: a mask that blocks
+    everything except self-attention must change the output vs unmasked,
+    and must match the exact tiled reference. Run once per mode probe."""
+    try:
+        torch.manual_seed(0)
+        q = torch.randn(1, 2, 16, 8, dtype=dtype, device=device)
+        k = torch.randn(1, 2, 16, 8, dtype=dtype, device=device)
+        v = torch.randn(1, 2, 16, 8, dtype=dtype, device=device)
+        eye = torch.eye(16, dtype=torch.bool, device=device)[None, None]
+        m = eye if fn_name == "bool" else _additive_mask(eye, dtype)
+        out_m = _fused_sdpa(q, k, v, 2, m)
+        out_u = _fused_sdpa(q, k, v, 2, None)
+        if (out_m - out_u).abs().max().item() < 1e-3:
+            logging.warning(
+                "[Krea2Regional] %s-mask path IGNORES masks on this "
+                "backend — rejected", fn_name)
+            return False
+        ref = _tiled_attention(q, k, v, eye)
+        b, h, l, d = ref.shape
+        ref = ref.transpose(1, 2).reshape(b, l, h * d)
+        if (out_m - ref).abs().max().item() > (
+                0.05 if dtype != torch.float32 else 1e-3):
+            logging.warning(
+                "[Krea2Regional] %s-mask path DIVERGES from reference — "
+                "rejected", fn_name)
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _select_masked_sdpa(q, k, v, heads, bool_mask):
+    """Probe mask strategies once per (L, device, dtype), then use the cached
+    winner for every subsequent call at that sequence length."""
+    L = q.shape[2]
+    key = (L, str(q.device), str(q.dtype))
+    mode = _MASK_MODE.get(key)
+    if mode == "add":
+        return _fused_sdpa(q, k, v, heads, _additive_mask(bool_mask, q.dtype))
+    if mode == "bool":
+        return _fused_sdpa(q, k, v, heads, bool_mask)
+    if mode == "tiled":
+        out = _tiled_attention(q, k, v, bool_mask)
+        b, h, l, d = out.shape
+        return out.transpose(1, 2).reshape(b, l, h * d)
+    # probe once for this sequence length
+    for name, fn in (
+        ("add", lambda: _fused_sdpa(q, k, v, heads,
+                                    _additive_mask(bool_mask, q.dtype))),
+        ("bool", lambda: _fused_sdpa(q, k, v, heads, bool_mask)),
+    ):
+        try:
+            if not _mask_efficacy_ok(name, q.dtype, q.device):
+                continue
+            out = fn()
+            _MASK_MODE[key] = name
+            logging.info(
+                "[Krea2Regional] masked attention @L=%d: fused sdpa "
+                "(%s mask, efficacy verified)", L, name)
+            return out
+        except (RuntimeError, ImportError) as e:
+            logging.info(
+                "[Krea2Regional] fused sdpa (%s mask) @L=%d rejected: "
+                "%s", name, L, str(e)[:300])
+            continue
+    _MASK_MODE[key] = "tiled"
+    logging.info(
+        "[Krea2Regional] masked attention @L=%d: fused kernels "
+        "unavailable -> tiled attention (exact, bounded memory)", L)
+    out = _tiled_attention(q, k, v, bool_mask)
+    b, h, l, d = out.shape
+    return out.transpose(1, 2).reshape(b, l, h * d)
+
+
+def _native_ref_latents(rest, kwargs):
+    """Find Krea2's native ``ref_latents`` across ComfyUI signature drift."""
+    ref = kwargs.get("ref_latents")
+    if ref is not None:
+        return ref
+    # Current core calls wrappers positionally as
+    # (..., attention_mask, ref_latents, transformer_options). The attention
+    # mask is a Tensor, while ref_latents is a list/tuple of Tensors.
+    for a in rest:
+        if (isinstance(a, (list, tuple)) and len(a) > 0
+                and all(torch.is_tensor(v) for v in a)):
+            return a
+    return None
+
+
+def _native_ref_token_count(ref_latents, patch):
+    """Match SingleStreamDiT.process_img token counts without encoding refs."""
+    if not ref_latents:
+        return 0
+    total = 0
+    patch = max(int(patch), 1)
+    for ref in ref_latents:
+        if not torch.is_tensor(ref) or ref.ndim < 4:
+            continue
+        # For 5D Wan-style still latents, core flattens B*T but the spatial
+        # token count remains ceil(H/patch)*ceil(W/patch).
+        rh, rw = int(ref.shape[-2]), int(ref.shape[-1])
+        total += (-(-rh // patch)) * (-(-rw // patch))
+    return total
 
 
 def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
@@ -525,25 +740,20 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
     if transformer_options is None:
         transformer_options = {}
     bundle = transformer_options.get(BUNDLE_KEY)
-    if bundle is not None and not transformer_options.get(CONSUMED_KEY):
-        # Krea 2 native reference latents append reference-image tokens to
-        # the image sequence: the txt_total check below still passes, but
-        # region masks would silently misalign. Fail loudly instead.
-        ref = kwargs.get("ref_latents")
-        if ref is None:
-            for a in rest:
-                if isinstance(a, (list, tuple)) and len(a) > 0 \
-                        and torch.is_tensor(a[0]):
-                    ref = a
-                    break
-        if ref is not None and len(ref) > 0:
-            raise RuntimeError(
-                "[Krea2Regional] Krea 2 native reference latents are not "
-                "supported together with regional attention / regional "
-                "LoRA routing yet: reference tokens extend the image "
-                "sequence and would silently bypass region masks. Bypass "
-                "Apply Regional for the reference pass, or drop the "
-                "reference image input.")
+    model = executor.class_obj  # the SingleStreamDiT instance
+
+    # Native Krea2 reference latents are appended AFTER the live target image
+    # tokens by current ComfyUI core: [text | target | refs]. Only count them
+    # when a reference method is actually active; a plain base Krea2 model may
+    # receive the conditioning value but intentionally ignore it.
+    ref_latents = _native_ref_latents(rest, kwargs)
+    ref_method = kwargs.get("ref_latents_method",
+                            getattr(model, "default_ref_method", None))
+    reflen = (
+        _native_ref_token_count(ref_latents, getattr(model, "patch", 1))
+        if ref_method is not None else 0
+    )
+
     if (
         bundle is None
         or context is None
@@ -554,7 +764,6 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
         return executor(x, timesteps, context, *rest,
                         transformer_options=transformer_options, **kwargs)
 
-    model = executor.class_obj  # the SingleStreamDiT instance
     patch = model.patch
     # Mirror _forward exactly: a 5D latent (B, C, T, H, W) is flattened to
     # (B*T, C, H, W) before patchify, so the DiT's effective batch is B*T.
@@ -578,19 +787,25 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
 
     segments = bundle["segments"]
     txtlen = bundle["txt_total"]
-    L = txtlen + imglen
+    L = txtlen + imglen + reflen
 
     # ---- run-level cache: the masks depend only on geometry + batch layout,
     # so build them ONCE per sampling run instead of every step. This kills
     # the per-step GPU alloc churn that fragments cudaMallocAsync and caused
     # sporadic OOM on tight-VRAM setups.
-    ck = (h_, w_, bs, tuple(batch_rows), str(device), txtlen)
+    ck = (h_, w_, bs, tuple(batch_rows), str(device), txtlen, reflen,
+          str(ref_method))
     rt = bundle.get("_rt")
     if rt is None or rt.get("key") != ck:
-        rt = {"key": ck, "additive": {}, "token_masks": None,
+        rt = {"key": ck, "token_masks": None,
               "masks_built": False, "call": 0, "blk": 0,
               "aff": None, "refined": None, "last_t": None}
         bundle["_rt"] = rt
+        if reflen:
+            logging.info(
+                "[Krea2Regional] native refs active: %d ref token(s); "
+                "joint sequence=%d text + %d target + %d ref",
+                reflen, txtlen, imglen, reflen)
 
     ad = bundle.get("adaptive") or {}
     ad_mode = ad.get("mode", "off")
@@ -602,7 +817,8 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
     if rt["last_t"] is not None and t0 > rt["last_t"] + 1e-6:
         rt.update(call=0, aff=None, refined=None)
         if ad_mode != "off":
-            rt.update(masks_built=False, token_masks=None, additive={})
+            rt.update(masks_built=False, token_masks=None)
+        _ADD_CACHE.clear()
     rt["last_t"] = t0
     rt["call"] += 1
     rt["blk"] = 0  # per-call joint-attention block counter (capture below)
@@ -616,7 +832,7 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
         # only the attention masks change: keep token masks + adaptive state
         rt["restrict_now"] = restrict_now
         rt["masks_built"] = False
-        rt["additive"] = {}
+        _ADD_CACHE.clear()
 
     # ---- adaptive finalize: capture window over -> snap masks to the
     # discovered subject silhouettes and rebuild everything once
@@ -632,7 +848,8 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
         rt["refined"] = _finalize_adaptive(
             rt["aff"], base_soft, ad_mode,
             float(ad.get("threshold", 0.45)), h_, w_)
-        rt.update(masks_built=False, token_masks=None, additive={})
+        rt.update(masks_built=False, token_masks=None)
+        _ADD_CACHE.clear()
 
     if not rt["masks_built"]:
         if rt["refined"] is not None:
@@ -647,8 +864,13 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
             soft = _exclusive_soft(soft)
         hard = soft > 0.5
 
+        # Pre-allocate the allow mask buffer and fill it in-place.
+        # The mask shape is deterministic from geometry (L × L), so we
+        # allocate once per run and update the content on restrict toggle
+        # or adaptive finalize — no new tensor allocation.
         allow, txt_allow = _build_allow(
-            segments, hard, imglen, rt.get("restrict_now", False), device
+            segments, hard, imglen, rt.get("restrict_now", False), device,
+            reflen=reflen
         )
         # When every row is regional (the usual turbo cfg=1 case), keep batch
         # dim 1 so the mask broadcasts against ANY caller batch — including
@@ -668,28 +890,22 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
                     txtm[i] = True
             joint = joint[:, None]  # (B, 1, L, L)
             txtm = txtm[:, None]
-        rt.update(soft=soft, joint=joint, txtm=txtm, masks_built=True)
+        rt.update(soft=soft, joint=joint, txtm=txtm, masks_built=True,
+                   hard=hard)
     soft = rt["soft"]
     joint = rt["joint"]
     txtm = rt["txtm"]
-    additive_cache = rt["additive"]
 
     # which mid-network blocks to sample affinity from (evenly spaced 4 in
     # the middle half — semantics live there, extremes are noisier)
     if capturing:
         nblocks = len(model.blocks)
-        step_ = max(nblocks // 8, 1)
-        capture_set = {nblocks // 4 + i * step_ for i in range(4)}
+        # Sample 2 mid-network blocks instead of 4 — semantics live there
+        # and the affinity signal is already strong with half the blocks.
+        # This halves the capture matmul cost (2 blocks × R regions × einsum).
+        step_ = max(nblocks // 4, 1)
+        capture_set = {nblocks // 3, nblocks // 3 + step_}
         rows_t = torch.tensor(batch_rows, device=device)
-
-    def _additive(sel: torch.Tensor, dtype):
-        key = (sel.data_ptr(), dtype)
-        if key not in additive_cache:
-            neg = torch.finfo(dtype).min if dtype.is_floating_point else -1e9
-            additive_cache[key] = torch.zeros(
-                sel.shape, dtype=dtype, device=sel.device
-            ).masked_fill_(~sel, neg)
-        return additive_cache[key]
 
     prev_override = transformer_options.get("optimized_attention_override")
 
@@ -714,19 +930,29 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
                                 dtype=torch.float32, device=q.device)
                         q_img = q[:, :, txtlen:txtlen + imglen]
                         scale_ = q.shape[-1] ** -0.5
-                        for r, (s, e) in enumerate(segments[1:]):
-                            k_r = k[:, :, s:e]
-                            # heavy matmul stays in the model's native dtype
-                            # (a .float() here copies the WHOLE query tensor
-                            # to fp32 and runs the matmul several times
-                            # slower); only the tiny reduction is fp32
+                        # Chunked affinity capture: process regions in small
+                        # groups to bound peak memory when there are many
+                        # regions with long prompts. Each chunk is an
+                        # independent accumulate, so order doesn't matter.
+                        region_spans = list(segments[1:])
+                        chunk_size = 4  # regions per chunk
+                        for chunk_start in range(0, len(region_spans), chunk_size):
+                            chunk = region_spans[chunk_start:chunk_start + chunk_size]
+                            # stack keys for this chunk: (B, H, sum_key, D)
+                            k_chunks = [k[:, :, s:e] for s, e in chunk]
+                            k_cat = torch.cat(k_chunks, dim=2)
                             att = torch.einsum(
-                                "bhid,bhjd->bhij", q_img, k_r) * scale_
-                            # max over the region's prompt-token keys (keys
-                            # on trigger words); mean over heads; cond rows
-                            a = att.amax(dim=3).float().mean(dim=1)
-                            a = a[rows_t[:a.shape[0]]].sum(dim=0)
-                            rt["aff"][r] += a
+                                "bhid,bhjd->bhij", q_img, k_cat) * scale_
+                            # split result back per region for the reduction
+                            offset = 0
+                            for ci, (s, e) in enumerate(chunk):
+                                ridx = chunk_start + ci
+                                kl = e - s
+                                att_r = att[:, :, :, offset:offset + kl]
+                                offset += kl
+                                a = att_r.amax(dim=3).float().mean(dim=1)
+                                a = a[rows_t[:a.shape[0]]].sum(dim=0)
+                                rt["aff"][ridx] += a
         elif seq == txtlen and txtlen != model.txtlayers:
             sel = txtm  # txtfusion refiner blocks
         # A sub-call with a batch our per-row mask can't broadcast to (some
@@ -735,14 +961,25 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
         if sel is not None and sel.shape[0] not in (1, qb):
             sel = None
         if sel is not None and mask is None:
-            mask = _additive(sel, q.dtype)
+            # Convert the bool allow-mask to an additive bias for the host
+            # attention function. The host's own attention backend (flash,
+            # efficient, sage, etc.) handles the mask — we just need to pass
+            # it in the right format. Bool masks are kept for the module-level
+            # additive cache (half the memory of pre-converting to float).
+            #
+            # The mask-efficacy ladder (_mask_efficacy_ok) is available as a
+            # diagnostic: if the host backend silently ignores masks, the
+            # _select_masked_sdpa fallback can be used — but only as a last
+            # resort, because it bypasses the host's head-reshape and gate
+            # logic. The normal path lets func() handle everything.
+            mask = _additive_mask(sel, q.dtype)
         if prev_override is not None:
             return prev_override(func, q, k, v, heads, mask=mask, **kw)
         return func(q, k, v, heads, mask=mask, **kw)
 
     if rt["token_masks"] is None:
         rt["token_masks"] = _build_token_masks(
-            bundle, segments, soft, imglen, batch_rows, device
+            bundle, segments, soft, imglen, batch_rows, device, reflen=reflen
         )
     token_masks = rt["token_masks"]
 
@@ -750,7 +987,8 @@ def _diffusion_wrapper(executor, x, timesteps, context, *args, **kwargs):
     transformer_options["optimized_attention_override"] = override
     CTX.token_masks = token_masks
     CTX.txtlen = txtlen
-    CTX.imglen = imglen
+    CTX.imglen = imglen + reflen
+    CTX.reflen = reflen
     CTX.txtlayers = getattr(model, "txtlayers", -1)
     try:
         return executor(x, timesteps, context, *rest,
@@ -917,6 +1155,74 @@ class Krea2RegionalPrompt:
         return (list(prev_regions or []) + [region],)
 
 
+def _clone_for_regional(model, dynamic_vram_mode="regional safe"):
+    """Clone the input patcher, avoiding AIMDO DynamicVRAM for Regional.
+
+    As of ComfyUI 2026, ModelPatcherDynamic's pinned host buffers can grow
+    monotonically across repeated restaging of a patched Krea2 model until
+    ``hostbuf_grow`` reaches the per-model reservation cap.  Regional models
+    are especially likely to be restaged because object patches / LoRAs make
+    the patch signature differ from the base checkpoint.
+
+    Current ComfyUI provides ``get_non_dynamic_delegate()`` specifically to
+    obtain a normal ModelPatcher for a dynamic model.  Prefer that path for
+    Regional so repeated generations use estimate-based model management
+    instead of AIMDO's host-buffer allocator.  The original input MODEL is
+    untouched.
+
+    ``keep DynamicVRAM`` preserves the old behavior for users who explicitly
+    prefer AIMDO or are on a future ComfyUI where the upstream bug is fixed.
+    Compatibility fallbacks keep older ComfyUI versions working.
+    """
+    mode = str(dynamic_vram_mode or "regional safe").strip().lower()
+    keep_dynamic = mode.startswith("keep")
+
+    is_dynamic = False
+    try:
+        probe = getattr(model, "is_dynamic", None)
+        is_dynamic = bool(probe()) if callable(probe) else False
+    except Exception:
+        is_dynamic = False
+
+    if not is_dynamic or keep_dynamic:
+        return model.clone()
+
+    # Preferred current-ComfyUI API.  This also lets the Dynamic patcher
+    # maintain/reuse its non-dynamic clone-model override correctly.
+    delegate = getattr(model, "get_non_dynamic_delegate", None)
+    if callable(delegate):
+        try:
+            out = delegate()
+            logging.info(
+                "[Krea2Regional] DynamicVRAM detected: using the non-dynamic "
+                "Regional delegate to avoid AIMDO hostbuf_grow accumulation."
+            )
+            return out
+        except Exception as exc:
+            logging.warning(
+                "[Krea2Regional] get_non_dynamic_delegate() failed (%s); "
+                "trying clone(disable_dynamic=True).", exc
+            )
+
+    # Supported by current ModelPatcherDynamic.clone(); TypeError is expected
+    # on older ComfyUI builds whose clone() predates disable_dynamic.
+    try:
+        out = model.clone(disable_dynamic=True)
+        logging.info(
+            "[Krea2Regional] DynamicVRAM detected: cloned Regional model with "
+            "disable_dynamic=True to avoid AIMDO host-buffer accumulation."
+        )
+        return out
+    except TypeError:
+        logging.warning(
+            "[Krea2Regional] This ComfyUI build cannot disable DynamicVRAM "
+            "per model. Falling back to the old DynamicVRAM path. If you see "
+            "aimdo hostbuf_grow errors, update ComfyUI or launch it with "
+            "--disable-dynamic-vram."
+        )
+        return model.clone()
+
+
 class Krea2ApplyRegional:
     """Patch a Krea 2 model for single-pass regional generation."""
 
@@ -930,13 +1236,13 @@ class Krea2ApplyRegional:
                 "restrict_img_attn": ("BOOLEAN", {"default": False,
                     "tooltip": "Block image<->image attention across regions. "
                                "Strongest anti-bleed lever; can look collaged."}),
-                "exclusive_masks": ("BOOLEAN", {"default": True,
+                "exclusive_masks": ("BOOLEAN", {"default": False,
                     "tooltip": "Where grown/feathered region masks overlap, "
                                "each token keeps only its strongest region "
                                "(no double LoRA in the gap)."}),
                 "adaptive_masks": (["off", "refine boxes",
                                     "free (ignore boxes)"],
-                    {"default": "off",
+                    {"default": "refine boxes",
                      "tooltip": "FreeFuse-style adaptive routing: watch where "
                                 "the model actually places each subject during "
                                 "the first steps (prompt-token/image-token "
@@ -947,7 +1253,7 @@ class Krea2ApplyRegional:
                 "adaptive_steps": ("INT", {"default": 2, "min": 1, "max": 8,
                     "tooltip": "How many model calls to observe before "
                                "snapping the masks."}),
-                "adaptive_threshold": ("FLOAT", {"default": 0.45, "min": 0.05,
+                "adaptive_threshold": ("FLOAT", {"default": 0.85, "min": 0.05,
                     "max": 0.95, "step": 0.05,
                     "tooltip": "Affinity cutoff (fraction of each region's "
                                "peak). Lower = larger discovered regions."}),
@@ -963,11 +1269,11 @@ class Krea2ApplyRegional:
                                "snapshot each step. Suppresses late-step "
                                "drift/mutation inside regions. 0 = off; "
                                "0.2-0.4 anchors, 0.7+ freezes hard."}),
-                "region_lock_start": ("FLOAT", {"default": 0.35, "min": 0.0,
+                "region_lock_start": ("FLOAT", {"default": 0.25, "min": 0.0,
                     "max": 0.95, "step": 0.05,
                     "tooltip": "When (as a fraction of the schedule) to take "
                                "the snapshot."}),
-                "region_lock_end": ("FLOAT", {"default": 0.85, "min": 0.05,
+                "region_lock_end": ("FLOAT", {"default": 0.70, "min": 0.05,
                     "max": 1.0, "step": 0.05,
                     "tooltip": "When to release the lock so the model can "
                                "integrate seams and lighting."}),
@@ -983,8 +1289,14 @@ class Krea2ApplyRegional:
             },
             "optional": {
                 "base_loras": ("KREA2_LORAS",),
+                "dynamic_vram_mode": (["regional safe", "keep DynamicVRAM"],
+                    {"default": "regional safe",
+                     "tooltip": "Recommended: Regional safe clones a DynamicVRAM/AIMDO "
+                                "Krea2 model into ComfyUI's normal model-management path. "
+                                "This avoids the current repeated-run AIMDO hostbuf_grow "
+                                "bug. Keep DynamicVRAM restores the old behavior."}),
                 "unmaskable_layers": (["skip", "apply globally"],
-                    {"default": "skip",
+                    {"default": "apply globally",
                      "tooltip": "Some LoRA layers (timestep/modulation "
                                 "embedders from newer trainers) have no "
                                 "spatial token axis and can't be region-"
@@ -1000,17 +1312,18 @@ class Krea2ApplyRegional:
     CATEGORY = "conditioning/krea2_regional"
 
     def apply(self, model, conditioning, regions, restrict_img_attn,
-              exclusive_masks=True, adaptive_masks="off", adaptive_steps=2,
-              adaptive_threshold=0.45, base_loras_exclude_regions=False,
-              region_lock_strength=0.0, region_lock_start=0.35,
-              region_lock_end=0.85, restrict_end_percent=1.0,
-              unmaskable_layers="skip", base_loras=None):
+              exclusive_masks=False, adaptive_masks="refine boxes", adaptive_steps=2,
+              adaptive_threshold=0.85, base_loras_exclude_regions=False,
+              region_lock_strength=0.35, region_lock_start=0.25,
+              region_lock_end=0.70, restrict_end_percent=1.0,
+              unmaskable_layers="apply globally", base_loras=None,
+              dynamic_vram_mode="regional safe"):
         if len(conditioning) != 1:
             logging.warning("[Krea2Regional] base conditioning has %d entries; "
                             "using the first.", len(conditioning))
         base_cond, base_extra = conditioning[0][0], dict(conditioning[0][1])
 
-        m = model.clone()
+        m = _clone_for_regional(model, dynamic_vram_mode)
 
         # ---- concatenate prompts, record segments ----
         chunks = [base_cond] + [r["cond"].to(base_cond) for r in regions]

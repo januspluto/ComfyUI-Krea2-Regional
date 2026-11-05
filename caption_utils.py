@@ -174,7 +174,38 @@ _LORA_TAG_RE = re.compile(r"<lora:([^:>]+?)(?::([-\d.]+))?>", re.IGNORECASE)
 from collections import OrderedDict as _OrderedDict
 
 _LORA_SD_CACHE: "_OrderedDict[tuple, dict]" = _OrderedDict()
-_LORA_CACHE_MAX = 6
+
+# Bounds are generous by default: evicting a LoRA means re-reading hundreds
+# of MB from disk on the next run that wants it, which shows up as slow
+# "prep" time. Override via environment if RAM is tight:
+#   KREA2_LORA_CACHE_MAX  (entries, default 24)
+#   KREA2_LORA_CACHE_GB   (total size, default 12)
+import os as _os
+
+_LORA_CACHE_MAX = max(int(_os.environ.get("KREA2_LORA_CACHE_MAX", 24)), 1)
+_LORA_CACHE_BYTES = int(
+    float(_os.environ.get("KREA2_LORA_CACHE_GB", 12)) * (1 << 30))
+
+
+def _sd_nbytes(sd):
+    try:
+        return sum(int(t.numel()) * int(t.element_size())
+                   for t in sd.values() if hasattr(t, "numel"))
+    except Exception:
+        return 0
+
+
+def _cache_evict():
+    total = sum(_sd_nbytes(v) for v in _LORA_SD_CACHE.values())
+    while _LORA_SD_CACHE and (len(_LORA_SD_CACHE) > _LORA_CACHE_MAX
+                              or total > _LORA_CACHE_BYTES):
+        key, sd = _LORA_SD_CACHE.popitem(last=False)
+        total -= _sd_nbytes(sd)
+        logging.info(
+            "[Krea2Regional] lora cache evicted '%s' (%.0f MB) — it will "
+            "re-read from disk next use. Raise KREA2_LORA_CACHE_MAX / "
+            "KREA2_LORA_CACHE_GB if this churns every run.",
+            _os.path.basename(str(key[0])), _sd_nbytes(sd) / (1 << 20))
 
 
 def clear_lora_cache():
@@ -367,8 +398,7 @@ def _load_lora_entry(name: str, strength: float):
             del _LORA_SD_CACHE[k]
         sd = comfy.utils.load_torch_file(path, safe_load=True)
         _LORA_SD_CACHE[key] = sd
-        while len(_LORA_SD_CACHE) > _LORA_CACHE_MAX:
-            _LORA_SD_CACHE.popitem(last=False)
+        _cache_evict()
     else:
         _LORA_SD_CACHE.move_to_end(key)
     return {"sd": sd, "strength": strength,

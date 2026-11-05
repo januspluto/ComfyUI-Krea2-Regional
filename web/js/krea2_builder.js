@@ -1,7 +1,9 @@
 // Krea2 Regional Builder — canvas editor with per-region LoRA dropdowns,
 // rect + lasso shapes, obj/text regions, grid/snap, Grab BG, pop-out editor.
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
+console.info("[Krea2Regional] krea2_builder.js fetched (v1.2.1 prompt sync)");
+const { app } = await import("../../scripts/app.js");
+const { api } = await import("../../scripts/api.js");
+console.info("[Krea2Regional] app/api imports OK");
 
 const COLORS = ["#e06c75", "#61afef", "#98c379", "#e5c07b", "#c678dd",
                 "#56b6c2", "#d19a66", "#abb2bf"];
@@ -175,13 +177,24 @@ function captionToState(cap) {
     return out;
 }
 
+// Every editable prompt field has one serialized ComfyUI widget and one visible
+// textarea. Keep this list authoritative so Clear, Caption, Paste, execution
+// feedback, and workflow load cannot update only part of the UI.
+const PROMPT_FIELDS = Object.freeze([
+    "base_prompt", "background", "aesthetics", "lighting", "medium"
+]);
+const PROMPT_FIELD_SET = new Set(PROMPT_FIELDS);
+
 const BUILDER_INSTANCES = new Set();
 
 class Builder {
     constructor(node) {
         this.node = node;
         BUILDER_INSTANCES.add(this);
-        this.state = { regions: [], base_loras: [] };
+        this.state = { regions: [], base_loras: [], prompt_heights: {
+            base_prompt: 120, background: 120,
+            aesthetics: 64, lighting: 64, medium: 64
+        } };
         this.sel = -1;
         this.execBg = null;
         this.preferExec = false;
@@ -205,6 +218,16 @@ class Builder {
         }
         this.state.grid = this.state.grid ||
             { guide: "none", n: 16, snap: false };
+        this.state.prompt_heights = Object.assign(
+            { base_prompt: 120, background: 120,
+              aesthetics: 64, lighting: 64, medium: 64 },
+            this.state.prompt_heights || {});
+
+        // Keep the real ComfyUI STRING widgets as the serialized source of truth,
+        // but hide their canvas rendering. The editor below mirrors them into
+        // normal DOM <textarea>s so the user can drag-resize the prompt boxes.
+        for (const name of PROMPT_FIELDS)
+            this.hideNativePromptWidget(name);
 
         // ---- DOM ----
         this.host = el("div", { width: "100%" });
@@ -212,6 +235,7 @@ class Builder {
                                 fontFamily: "sans-serif", color: "#ccc" });
         this.host.append(this.root);
         this.buildToolbars();
+        this.buildPromptPanel();
 
         this.canvas = el("canvas", { display: "block",
                                      background: "#141414",
@@ -224,7 +248,7 @@ class Builder {
                                  overflowY: "auto" });
         this.basePanel = el("div", { ...S.panel, maxHeight: "150px",
                                      overflowY: "auto" });
-        this.root.append(this.bar1, this.bar2, this.canvas,
+        this.root.append(this.bar1, this.bar2, this.promptPanel, this.canvas,
                          this.panel, this.basePanel);
 
         this.domWidget = node.addDOMWidget("k2b_editor", "div", this.host,
@@ -242,10 +266,139 @@ class Builder {
         this.hostRO = new ResizeObserver(() =>
             requestAnimationFrame(() => this.redraw()));
         this.hostRO.observe(this.host);
+        this.promptRO = new ResizeObserver(() => {
+            if (!this.capturePromptHeights()) return;
+            this.persist();
+            requestAnimationFrame(() => this.relayout());
+        });
+        for (const ta of [this.basePromptTA, this.backgroundTA,
+                          this.aestheticsTA, this.lightingTA, this.mediumTA])
+            if (ta) this.promptRO.observe(ta);
         this.bindCanvas();
         loraList().then(() => this.refreshPanels());
         requestAnimationFrame(() => { this.refreshPanels(); this.redraw(); });
         node.setSize([Math.max(node.size[0], 380), node.computeSize()[1]]);
+    }
+
+    // ---------------- resizable prompt textareas ----------------
+    hideNativePromptWidget(name) {
+        const w = this.node.widgets?.find((x) => x.name === name);
+        if (!w || w._k2bPromptHidden) return;
+        w._k2bPromptHidden = true;
+        w.hidden = true;
+        w.computeSize = () => [0, -4];
+        if (w.element) w.element.style.display = "none";
+        if (w.inputEl) w.inputEl.style.display = "none";
+    }
+
+    buildPromptPanel() {
+        // Keep the prompt editor visually integrated with the node body instead
+        // of drawing an opaque black card on top of coloured ComfyUI nodes.
+        this.promptPanel = el("div", {
+            background: "transparent", border: "none", overflow: "visible",
+            marginTop: "4px", padding: "2px 0 3px 0", boxSizing: "border-box"
+        });
+        const makeArea = (labelText, widgetName, placeholder, defaultHeight) => {
+            const wrap = el("div", { marginBottom: "7px" });
+            const label = el("div", { display: "flex", alignItems: "center",
+                                      marginBottom: "3px", color: "rgba(255,255,255,.72)",
+                                      fontSize: "11px" });
+            label.append(
+                el("span", null, { textContent: labelText }),
+                el("span", { marginLeft: "auto", opacity: 0.58, fontSize: "10px" },
+                   { textContent: "drag lower-right corner to resize" })
+            );
+            const h = Math.max(44, Number(
+                this.state.prompt_heights?.[widgetName] || defaultHeight));
+            const ta = el("textarea", {
+                display: "block", width: "100%", height: h + "px",
+                minHeight: "44px", maxHeight: "600px", resize: "vertical",
+                overflowY: "auto", padding: "7px 8px", lineHeight: "1.35",
+                boxSizing: "border-box", fontFamily: "sans-serif", fontSize: "12px",
+                color: "rgba(255,255,255,.92)",
+                background: "rgba(8, 10, 12, 0.34)",
+                border: "1px solid rgba(255,255,255,.14)",
+                borderRadius: "4px", outline: "none",
+                boxShadow: "inset 0 1px 2px rgba(0,0,0,.22)"
+            }, { placeholder, spellcheck: true });
+            const w = this.node.widgets?.find((x) => x.name === widgetName);
+            ta.value = String(w?.value ?? "");
+            ta.addEventListener("focus", () => {
+                ta.style.borderColor = "rgba(255,255,255,.28)";
+                ta.style.background = "rgba(8, 10, 12, 0.42)";
+            });
+            ta.addEventListener("blur", () => {
+                ta.style.borderColor = "rgba(255,255,255,.14)";
+                ta.style.background = "rgba(8, 10, 12, 0.34)";
+            });
+            ta.addEventListener("input", () => {
+                const ww = this.node.widgets?.find((x) => x.name === widgetName);
+                if (ww) {
+                    ww.value = ta.value;
+                    try { ww.callback?.(ta.value); } catch (e) { /* ignore */ }
+                }
+                this.node.setDirtyCanvas(true, true);
+            });
+            // Avoid graph hotkeys / canvas drag handling while editing text.
+            // Clipboard events must stay in the focused prompt textarea;
+            // they are not graph Copy/Paste shortcuts.
+            for (const ev of ["pointerdown", "mousedown", "wheel",
+                              "keydown", "keyup", "keypress",
+                              "copy", "cut", "paste"])
+                ta.addEventListener(ev, (e) => e.stopPropagation());
+            wrap.append(label, ta);
+            this.promptPanel.append(wrap);
+            return ta;
+        };
+        this.basePromptTA = makeArea(
+            "High-level description", "base_prompt", "high level description", 120);
+        this.backgroundTA = makeArea(
+            "Background", "background", "background", 120);
+        this.aestheticsTA = makeArea(
+            "Aesthetics", "aesthetics", "aesthetics / visual qualities", 64);
+        this.lightingTA = makeArea(
+            "Lighting", "lighting", "lighting", 64);
+        this.mediumTA = makeArea(
+            "Medium", "medium", "medium / capture style", 64);
+        this.promptTAs = {
+            base_prompt: this.basePromptTA,
+            background: this.backgroundTA,
+            aesthetics: this.aestheticsTA,
+            lighting: this.lightingTA,
+            medium: this.mediumTA,
+        };
+    }
+
+    capturePromptHeights() {
+        if (!this.state.prompt_heights) this.state.prompt_heights = {};
+        let changed = false;
+        const capture = (name, ta) => {
+            const h = ta?.offsetHeight || 0;
+            if (!h) return;
+            const prev = Number(this.state.prompt_heights[name] || 0);
+            if (Math.abs(prev - h) > 2) {
+                this.state.prompt_heights[name] = h;
+                changed = true;
+            }
+        };
+        capture("base_prompt", this.basePromptTA);
+        capture("background", this.backgroundTA);
+        capture("aesthetics", this.aestheticsTA);
+        capture("lighting", this.lightingTA);
+        capture("medium", this.mediumTA);
+        return changed;
+    }
+
+    syncPromptFields() {
+        const sync = (name, ta) => {
+            const w = this.node.widgets?.find((x) => x.name === name);
+            if (ta && w && ta.value !== String(w.value ?? ""))
+                ta.value = String(w.value ?? "");
+            const h = Math.max(56, Number(this.state.prompt_heights?.[name] || 120));
+            if (ta && Math.abs((ta.offsetHeight || h) - h) > 2) ta.style.height = h + "px";
+        };
+        for (const name of PROMPT_FIELDS)
+            sync(name, this.promptTAs?.[name]);
     }
 
     // ---------------- toolbars ----------------
@@ -274,22 +427,30 @@ class Builder {
         };
         this.popBtn = mkBtn("⧉", () => this.togglePop(),
                             "pop the editor out into a floating window");
+        const pasteBtn = mkBtn("Paste", () => this.pasteState(),
+            "paste layout JSON, or paste plain text into the focused prompt field");
+        // Clicking a button normally steals textarea focus. Capture the
+        // active field before that happens so plain-text Paste works.
+        pasteBtn.addEventListener("pointerdown", () => {
+            const active = document.activeElement;
+            this._pasteTarget = Object.values(this.promptTAs || {}).includes(active)
+                ? active : null;
+        });
         this.bar1.append(
             mkBtn("Copy", () => this.copyState(),
                   "copy everything as an Ideogram caption JSON"),
-            mkBtn("Paste", () => this.pasteState(),
-                  "paste regions JSON or an Ideogram caption"),
+            pasteBtn,
             mkBtn("Clear", () => {
                 this.state.regions = [];
                 this.state.base_loras = [];
                 this.sel = -1;
-                for (const n of ["base_prompt", "background", "aesthetics",
-                                 "lighting", "medium"])
-                    this.setW(n, "");
+                for (const name of [...PROMPT_FIELDS, "region_append"])
+                    this.setW(name, "");
+                this._pasteTarget = null;
                 this.node.setDirtyCanvas(true, true);
                 this.commit();
                 this.relayout();
-            }, "clear regions, base loras AND the description fields"),
+            }, "clear ALL prompts, regions, and base loras"),
             mkBtn("Caption", () => this.runCaption(),
                   "run ONLY the connected captioner and import its output"),
             mkBtn("Grab BG", () => this.grabBG(),
@@ -381,9 +542,15 @@ class Builder {
         const bars = (this.bar1?.offsetHeight || 0) +
                      (this.bar2?.offsetHeight || 0);
         const chrome = bars > 0 ? bars + 8 : 52;
+        const prompts = this.promptPanel?.offsetHeight ||
+            ((this.state.prompt_heights?.base_prompt || 120) +
+             (this.state.prompt_heights?.background || 120) +
+             (this.state.prompt_heights?.aesthetics || 64) +
+             (this.state.prompt_heights?.lighting || 64) +
+             (this.state.prompt_heights?.medium || 64) + 112);
         const ph = Math.min(this.panel.scrollHeight || 0, 230);
         const bh = Math.min(this.basePanel.scrollHeight || 0, 150);
-        return chrome + canvasH + ph + bh + 18;
+        return chrome + prompts + canvasH + ph + bh + 22;
     }
 
     relayout() {
@@ -486,8 +653,13 @@ class Builder {
     }
 
     setW(name, val) {
+        const text = String(val ?? "");
+        // The underlying widgets own serialization/API output; update those
+        // and the visible textarea in the *same* operation.
         const w = this.node.widgets?.find((x) => x.name === name);
-        if (w) w.value = val;
+        if (w) w.value = text;
+        const ta = this.promptTAs?.[name];
+        if (ta && ta.value !== text) ta.value = text;
     }
 
     exportCaption() {
@@ -574,22 +746,60 @@ class Builder {
     }
 
     async pasteState() {
-        let txt = "";
-        try { txt = await navigator.clipboard.readText(); } catch (e) { return; }
-        try {
-            const j = JSON.parse(txt);
+        // Saved synchronously by the Paste button's pointerdown, before
+        // the button steals focus. Also supports keyboard-triggered paste.
+        const target = this._pasteTarget ||
+            (Object.values(this.promptTAs || {}).includes(document.activeElement)
+                ? document.activeElement : null);
+        this._pasteTarget = null;
+        let txt;
+        try { txt = await navigator.clipboard.readText(); }
+        catch (e) { this.toast("clipboard access denied"); return; }
+        if (!txt) return;
+
+        let j = null;
+        try { j = JSON.parse(txt); } catch (e) { /* plain text */ }
+        if (j && typeof j === "object" && !Array.isArray(j)) {
             if (j.compositional_deconstruction) {
                 this.applyCaption(j);
                 return;
             }
             if (Array.isArray(j.regions)) {
                 this.state.regions = j.regions;
-                if (j.base_loras?.length) this.state.base_loras = j.base_loras;
+                if (Array.isArray(j.base_loras))
+                    this.state.base_loras = j.base_loras;
+                // A raw Builder state may optionally contain prompt fields.
+                // Do not clear an existing prompt when that key is absent.
+                for (const name of PROMPT_FIELDS)
+                    if (Object.prototype.hasOwnProperty.call(j, name))
+                        this.setW(name, j[name]);
                 this.sel = -1;
                 this.commit();
                 this.relayout();
+                return;
             }
-        } catch (e) { /* not JSON; ignore */ }
+        }
+        if (target) {
+            // Clipboard plain text goes *into* the selected prompt field,
+            // matching normal Ctrl+V rather than replacing the entire JSON.
+            const name = Object.keys(this.promptTAs || {})
+                .find((k) => this.promptTAs[k] === target);
+            if (name && PROMPT_FIELD_SET.has(name)) {
+                const before = target.value;
+                const start = Number.isInteger(target.selectionStart)
+                    ? target.selectionStart : before.length;
+                const end = Number.isInteger(target.selectionEnd)
+                    ? target.selectionEnd : start;
+                const next = before.slice(0, start) + txt + before.slice(end);
+                this.setW(name, next);
+                const caret = start + txt.length;
+                try { target.setSelectionRange(caret, caret); } catch (e) {}
+                target.focus();
+                this.node.setDirtyCanvas(true, true);
+                return;
+            }
+        }
+        this.toast("paste a layout JSON, or focus a prompt box for plain text");
     }
 
     // ---------------- partial caption run ----------------
@@ -1646,8 +1856,9 @@ class Builder {
             try {
                 const f = JSON.parse(fields);
                 for (const [name, val] of Object.entries(f)) {
-                    const w = this.node.widgets?.find((x) => x.name === name);
-                    if (w && typeof val === "string") w.value = val;
+                    if (typeof val === "string" &&
+                        (PROMPT_FIELD_SET.has(name) || name === "region_append"))
+                        this.setW(name, val);
                 }
                 this.node.setDirtyCanvas(true, true);
             } catch (e) { /* ignore */ }
@@ -1668,22 +1879,59 @@ class Builder {
     }
 }
 
+function isNormalBuilderNode(node) {
+    const names = [
+        node?.comfyClass,
+        node?.type,
+        node?.constructor?.comfyClass,
+        node?.constructor?.type,
+    ].filter(Boolean);
+    return names.includes("Krea2RegionalBuilder");
+}
+
+function attachNormalBuilder(node, source) {
+    if (!node || node.k2b || !isNormalBuilderNode(node)) return node?.k2b || null;
+    try {
+        node.k2b = new Builder(node);
+        console.info(`[Krea2Regional] Builder attached via ${source}`, node.id);
+        return node.k2b;
+    } catch (err) {
+        console.error(`[Krea2Regional] Builder attach FAILED via ${source}`, err, node);
+        return null;
+    }
+}
+
 app.registerExtension({
-    name: "krea2.regional.builder",
-    // ComfyUI calls this when the user presses R (refresh node definitions).
-    // Re-fetch the lora list and repaint every open builder so newly added
-    // loras show up without a full page reload.
+    name: "krea2.regional.builder.recovery",
+    async init() {
+        console.info("[Krea2Regional] extension init OK");
+    },
+    async setup() {
+        console.info("[Krea2Regional] extension setup OK");
+        // Attach to already-existing graph nodes too. This covers frontend builds
+        // where beforeRegisterNodeDef ran before this extension was evaluated.
+        for (const node of app.graph?._nodes || [])
+            attachNormalBuilder(node, "setup-existing-node");
+    },
     async refreshComboInNodes() {
         await loraList(true);
         for (const inst of BUILDER_INSTANCES)
             try { inst.refreshPanels(); inst.redraw(); } catch (e) { /**/ }
     },
+    nodeCreated(node) {
+        if (isNormalBuilderNode(node)) {
+            console.info("[Krea2Regional] nodeCreated matched Krea2RegionalBuilder", node.id);
+            requestAnimationFrame(() => attachNormalBuilder(node, "nodeCreated"));
+        }
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "Krea2RegionalBuilder") return;
+        const defName = nodeData?.name || nodeData?.type || nodeType?.comfyClass || nodeType?.type;
+        if (defName !== "Krea2RegionalBuilder") return;
+        console.info("[Krea2Regional] beforeRegisterNodeDef matched Krea2RegionalBuilder");
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             onCreated?.apply(this, arguments);
-            this.k2b = new Builder(this);
+            attachNormalBuilder(this, "onNodeCreated");
         };
         const onExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (msg) {
@@ -1705,6 +1953,7 @@ app.registerExtension({
             onRemoved?.apply(this, arguments);
             this.k2b?.dock();
             this.k2b?.hostRO?.disconnect();
+            this.k2b?.promptRO?.disconnect();
             if (this.k2b) BUILDER_INSTANCES.delete(this.k2b);
         };
         const onConfigure = nodeType.prototype.onConfigure;
@@ -1717,10 +1966,12 @@ app.registerExtension({
                 b.state.regions = v.regions || [];
                 b.state.base_loras = v.base_loras || [];
                 if (v.grid) Object.assign(b.state.grid, v.grid);
-                if (v.bg_brightness != null)
-                    b.state.bg_brightness = v.bg_brightness;
+                if (v.bg_brightness != null) b.state.bg_brightness = v.bg_brightness;
+                if (v.prompt_heights)
+                    b.state.prompt_heights = Object.assign(b.state.prompt_heights || {}, v.prompt_heights);
             } catch (e) { /* keep current */ }
             b.sel = -1;
+            b.syncPromptFields();
             b.syncGridUI();
             b.refreshPanels();
             b.relayout();
@@ -1728,3 +1979,4 @@ app.registerExtension({
         };
     },
 });
+

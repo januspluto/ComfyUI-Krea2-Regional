@@ -578,3 +578,62 @@ with torch.no_grad():
 assert not bool(b23b["_rt"]["joint"][0, 0][img_sl, img_sl].all()), \
     "default (no end sigma) stays restricted for the whole run"
 print("23) scheduled restrict window: ok")
+
+# ---- 24. native Krea2 reference-latent routing: [text | target | refs]
+# The target offsets must remain identical to the no-ref path, regional LoRAs
+# must be zero on refs, and refs remain globally readable attention context.
+ref_len24 = 12
+hard24 = torch.stack([kr._latent_mask(m1, h_, w_, "cpu") > 0.5,
+                      kr._latent_mask(m2, h_, w_, "cpu") > 0.5])
+allow24, txt24 = kr._build_allow(
+    segments, hard24, imglen, True, "cpu", reflen=ref_len24)
+assert allow24.shape == (txtlen + imglen + ref_len24,) * 2
+assert txt24.shape == (txtlen, txtlen)
+t0_24, t1_24 = txtlen, txtlen + imglen
+r0_24, r1_24 = t1_24, t1_24 + ref_len24
+# references are global context even when target<->target is restricted
+assert bool(allow24[t0_24:t1_24, r0_24:r1_24].all())
+assert bool(allow24[r0_24:r1_24, t0_24:t1_24].all())
+assert bool(allow24[r0_24:r1_24, r0_24:r1_24].all())
+# prompt isolation remains in text<->text
+assert not bool(allow24[segments[1][0]:segments[1][1],
+                        segments[2][0]:segments[2][1]].any())
+
+b24 = {
+    "loras": [
+        {"uid": "base24", "weight": 0.7, "seg": None, "mask_idx": None},
+        {"uid": "reg24", "weight": 1.2, "seg": 1, "mask_idx": 0},
+    ],
+    "base_loras_exclude_regions": False,
+}
+soft24 = torch.stack([kr._latent_mask(m1, h_, w_, "cpu"),
+                      kr._latent_mask(m2, h_, w_, "cpu")])
+tm24 = kr._build_token_masks(
+    b24, segments, soft24, imglen, [True], "cpu", reflen=ref_len24)
+base24 = tm24["base24"][0, :, 0]
+reg24 = tm24["reg24"][0, :, 0]
+assert torch.allclose(base24[r0_24:r1_24], torch.full((ref_len24,), 0.7))
+assert torch.equal(reg24[r0_24:r1_24], torch.zeros(ref_len24)), \
+    "regional LoRA must never rewrite native reference tokens"
+assert torch.allclose(reg24[t0_24:t1_24], soft24[0] * 1.2)
+print("24a) native-ref attention + LoRA token layout: ok")
+
+# Real core forward regression. Current ComfyUI appends refs after the live image.
+# If an older core lacks native-ref support, skip this runtime portion cleanly.
+if hasattr(container.diffusion_model, "default_ref_method"):
+    old_ref_method24 = container.diffusion_model.default_ref_method
+    container.diffusion_model.default_ref_method = "index_timestep_zero"
+    ref24 = torch.randn(B, 16, 8, 8)
+    b24run = dict(bundle(restrict=False))
+    to24 = wrapped_opts(b24run)
+    with torch.no_grad():
+        out24 = container.diffusion_model.forward(
+            x, timesteps, context, ref_latents=[ref24],
+            transformer_options=to24)
+    container.diffusion_model.default_ref_method = old_ref_method24
+    assert out24.shape == x.shape
+    expected_ref24 = ((ref24.shape[-2] + CFG["patch"] - 1) // CFG["patch"]) * \
+                     ((ref24.shape[-1] + CFG["patch"] - 1) // CFG["patch"])
+    assert b24run["_rt"]["key"][-2] == expected_ref24, b24run["_rt"]["key"]
+    assert b24run["_rt"]["joint"].shape[-1] == txtlen + imglen + expected_ref24
+    print("24b) native-ref real SingleStreamDiT forward: ok")

@@ -342,12 +342,14 @@ class Krea2RegionalBuilder:
 
         # ---- regions ----
         regions, masks, region_texts, placed = [], [], [], []
+        skipped_empty = 0
         for r in state["regions"]:
             desc, tags = _extract_lora_tags(str(r.get("desc", "") or ""))
             rtype = r.get("rtype", "obj")
             text = str(r.get("text", "") or "").strip()
             prompt = _region_prompt_text(rtype, text, desc.strip())
             if not prompt:
+                skipped_empty += 1
                 continue
             mask = _region_mask(r, width, height, grow_px, feather_px)
             if mask is None:
@@ -409,6 +411,14 @@ class Krea2RegionalBuilder:
             base_text = ". ".join(sentences) or "an image"
         base_cond = _encode(clip, base_text)
 
+        if skipped_empty:
+            logging.warning(
+                "[Krea2Regional] %d region(s) had no prompt text and were "
+                "SKIPPED — a drawn box does nothing on its own. Click a "
+                "region on the canvas and type its prompt in the 'region "
+                "prompt...' box (or set it to a text region and fill in "
+                "the text). %d region(s) are active.",
+                skipped_empty, len(regions))
         base_loras = _dedup_loras(
             _entries(state["base_loras"]) + list(extra_base_loras or []))
 

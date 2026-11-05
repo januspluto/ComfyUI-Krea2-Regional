@@ -1,5 +1,16 @@
 # ComfyUI-Krea2-Regional
 
+## DynamicVRAM safety
+
+`Krea 2 - Apply Regional` defaults to **regional safe** model management. If
+ComfyUI supplied a DynamicVRAM/AIMDO model, the Regional clone is switched to
+ComfyUI's normal estimate-based patcher for sampling. This works around the
+current AIMDO `hostbuf_grow ... beyond reserved host buffer` accumulation seen
+after repeated Krea2 restaging. It does **not** disable DynamicVRAM globally.
+Set `dynamic_vram_mode` to **keep DynamicVRAM** only if you want the legacy
+behavior or are testing a ComfyUI/aimdo build where the upstream issue is fixed.
+
+
 Regional prompting and **per-region LoRA** for [Krea 2](https://github.com/krea-ai/krea-2)
 (K2) in ComfyUI — draw regions on a canvas, give each its own prompt and
 LoRAs, and generate in a **single pass**.
@@ -53,6 +64,23 @@ image — without running a full generation.
 
 An example workflow is in [`example_workflows/`](example_workflows/) — drag the `.json` onto the ComfyUI canvas to load it.
 
+## Default Apply Regional settings
+
+`Krea2 Apply Regional` opens with these defaults:
+
+- `restrict_img_attn = false`
+- `exclusive_masks = false`
+- `adaptive_masks = refine boxes`
+- `adaptive_steps = 2`
+- `adaptive_threshold = 0.85`
+- `base_loras_exclude_regions = false`
+- `region_lock_strength = 0.35`
+- `region_lock_start = 0.25`
+- `region_lock_end = 0.70`
+- `restrict_end_percent = 1.00`
+- `dynamic_vram_mode = regional safe`
+- `unmaskable_layers = apply globally`
+
 ## Nodes
 
 **Krea2 Regional Builder (canvas)** — the main event. A canvas editor with
@@ -68,7 +96,7 @@ one button. The region list doubles as **front-to-back depth** — reorder
 with the ↑/↓ buttons; the top region wins where masks overlap.
 
 **Krea2 Apply Regional** — patches the model for single-pass regional
-generation. Options: `adaptive_masks` (FreeFuse-style: snap masks to the
+generation. Options include `adaptive_masks` (FreeFuse-style: snap masks to the
 subjects the model actually draws), `restrict_img_attn` (block cross-region
 image attention) with `restrict_end_percent` scheduling, `exclusive_masks`
 (winner-take-all where masks overlap; exact ties go to the front region),
@@ -95,6 +123,23 @@ blocks if you'd rather compose regions from node chains than use the canvas.
 turns an Ideogram-4 caption JSON into regions with no canvas. The builder
 supersedes it (it imports the same JSON via `import_json` and lets you edit
 the result), so most users can ignore this; it's kept for no-UI pipelines.
+
+## Using a reference image on the canvas
+
+Two ways to get a picture under your regions (both are drawing aids — the
+canvas background is never used as generation input):
+
+- **Wire an image** into the builder's `image` input. It appears on the
+  canvas **after the graph runs once** — the preview is delivered as part
+  of the node's execution output, so a freshly wired image shows nothing
+  until the next run.
+- **Grab BG** pulls the most recently *generated* image out of ComfyUI's
+  queue history — handy for drawing regions over a result you just made.
+
+Every region needs a prompt. A drawn box with an empty `region prompt...`
+box is skipped at build time (it has nothing to condition on), so it will
+not appear in the `regions` output; the region list labels it "no prompt —
+not used" and the console logs how many were skipped.
 
 ## Captioning an image into regions
 
@@ -130,7 +175,7 @@ In order of impact:
    Note this supersedes the old "keep subjects out of the base" rule:
    *anchored* subject mentions (with positions) help; only *un-anchored*
    enumeration ("a knight and a wizard") causes drift.
-3. **`exclusive_masks`** (Apply Regional, default on) — where grown/feathered
+3. **`exclusive_masks`** (Apply Regional, default off) — where grown/feathered
    masks overlap, each token keeps only its strongest region.
 4. **`restrict_img_attn`** (Apply Regional) — blocks image-to-image attention
    across regions. Strongest lever; can look collaged at hard seams. Pair it
@@ -170,15 +215,11 @@ Wiring, after your KSampler → VAE Decode:
    nearest-centre rescue for subjects that drifted out of their box.
    Unmatched regions are left untouched.
 
-Settings that matter: `denoise` 0.2–0.3 (0.25 default) tightens likeness
-while keeping pose; 0.35+ starts recomposing inside the silhouette. Keep
-`shift` on "model default" — Krea 2 **Turbo** is distilled at a fixed mu
-and must inherit the first pass's schedule; the per-crop "auto" mode is
-for **RAW** only. Fewer `steps` (4–6) is often smoother than 8 for a
-partial-denoise pass. With no detector connected the node falls back to
-cropping by the region boxes themselves — fine for well-separated
-subjects, bleed-prone when they overlap, so prefer detection mode for
-multi-character images.
+Settings that matter: `detail_target = auto` is the new recommended default. Small subjects detail normally, large/full-body subjects switch to a face/head-only pass, and huge regions can be skipped automatically so the node behaves like a real detailer instead of a second full regeneration pass. `denoise` 0.12–0.18 (0.18 default) is the safest range; 0.2–0.25 pushes harder on likeness; 0.35+ starts recomposing inside the silhouette. Keep `shift` on "model default" — Krea 2 **Turbo** is distilled at a fixed mu and must inherit the first pass's schedule; the per-crop "auto" mode is for **RAW** only. Fewer `steps` (3–5) is often smoother than 8 for a partial-denoise pass. With no detector connected the node falls back to cropping by the region boxes themselves — fine for well-separated subjects, bleed-prone when they overlap, so prefer detection mode for multi-character images.
+
+## Native Krea2 reference latents
+
+`Krea2 Apply Regional` now composes with ComfyUI's native Krea2 reference-latent path. Current ComfyUI lays the joint sequence out as `[text | live target | reference tokens]`; Regional keeps its existing target masks on the live target span and extends the attention/LoRA bookkeeping over the appended reference span. Native references are treated as **global context** in this compatibility path: every target region may read them, while per-region LoRAs are explicitly zero on reference tokens so a character LoRA does not rewrite the clean reference representation. Base/global LoRAs retain their normal global behavior. `restrict_img_attn` still isolates target regions from one another, but references remain a global semantic bridge; region-assigned references are a separate feature, not implied by this support.
 
 ## Compatibility notes
 

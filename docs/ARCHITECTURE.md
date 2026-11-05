@@ -14,6 +14,10 @@ Because text and image tokens share every attention op, both regional
 prompting and regional LoRA can be done in a single forward pass, rather than
 running the model once per region and blending noise predictions.
 
+## Native-reference sequence layout
+
+With ComfyUI native Krea2 reference latents active, core appends reference image tokens after the live target image: `[text | target | refs]`. Regional masks continue to address only the live target span. The appended reference span is global attention context; regional LoRA token masks are zero there, while base/global LoRAs retain global semantics. This deliberately preserves native reference behavior without pretending that a reference belongs to a specific Builder region.
+
 ## Regional prompting (attention masking)
 
 All prompts (a shared base plus one per region) are concatenated into one text
